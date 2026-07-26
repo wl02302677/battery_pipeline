@@ -1,0 +1,1 @@
+"""Battery pipeline application package."""
