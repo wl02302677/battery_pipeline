@@ -125,10 +125,15 @@ Ordered by what would matter most on real data. Expanded in the README's
 4. Parallel ingestion — files are independent.
 5. Server-side downsampling — the dashboard currently pages through every
    sample, fine at ~1000 rows/test and not at 1M.
-6. Data quality *rules* rather than only counters: voltage outside the chemistry
-   window, sampling gaps, capacity drifting against the current sign.
-7. Partition `timeseries`; skip unchanged files by content hash.
-8. Dashboard: overlay multiple tests for side-by-side comparison.
+6. Wire the quality gate's alerting to a real channel (Slack/email/PagerDuty)
+   once credentials exist. Today "ping alert" means a CI failure with a
+   `::error::` annotation plus a persisted row in `data_quality_issues` — see
+   [Resolved TODOs](#resolved-todos) — which needs no credentials but also
+   doesn't reach anyone who isn't watching the PR.
+7. More quality rules: sampling gaps, capacity drifting against the current
+   sign, per-cycler (not just global) plausibility windows.
+8. Partition `timeseries` by test or time once it is large.
+9. Dashboard: overlay multiple tests for side-by-side comparison.
 
 ---
 
@@ -146,7 +151,37 @@ Kept for the record; all now implemented.
 - **Generated API documentation.** FastAPI serves it at `/docs`; the endpoints
   declare Pydantic response models, so the schema is typed rather than
   `list[dict[str, Any]]`.
-
-TODO:
-In the current docker, will it load the ETL everytime?
-Is there a way that only load the data once if source no change, and if source adding file, detect and load the new one
+- **Skip unchanged files; detect new ones without a separate step.** Yes, the
+  compose `etl` service re-runs on every `docker compose up`, but it now hashes
+  each file's content and skips reparsing/reloading a test whose hash matches
+  what's already stored (`files_unchanged` in the run summary). A new file is
+  found automatically, since directory discovery always walks the whole tree —
+  there's no separate "detect additions" step needed, just nothing to skip for
+  a `test_id` that isn't in the database yet. `tests.source_hash` holds the
+  hash; `tests.ingested_at` now means "last actually loaded," not "last run
+  seen," since an unchanged file no longer touches it. See
+  [app/etl/pipeline.py](app/etl/pipeline.py)'s `file_hash` and the check in
+  `ingest_directory`. Deletions aren't handled (a file removed from `data/`
+  leaves its test row in place) — not asked for, and a reasonable next step.
+- **Data contract and data quality checks in CI, persisted to Postgres.**
+  [app/etl/quality.py](app/etl/quality.py) has two checks:
+  `check_contract` flags a file that produced zero usable rows (its columns
+  didn't structurally satisfy the schema for its cycler — `critical`);
+  `check_quality` flags implausible values already in the database — voltage,
+  current, or temperature outside a physically sane window, an unexpectedly
+  missing optional field, or a skip/duplicate rate above a threshold. Every
+  finding is written to a new `data_quality_issues` table (`app/db.py`) — a
+  durable, queryable record, not just a log line. Both checks were validated
+  against the bundled dataset first: its known quirks (rescaled voltage,
+  missing Neware temperature, the skipped rows) produce **zero** findings, so
+  the gate doesn't fail CI over defects the pipeline already understands and
+  documents — only over ones it doesn't.
+  [app/etl/quality_gate.py](app/etl/quality_gate.py) is the CI entry point
+  (`python -m app.etl.quality_gate --data-root data`): it exits non-zero on any
+  `critical` finding, which fails the `data-quality` job in
+  [.github/workflows/tests.yml](.github/workflows/tests.yml) and blocks the PR,
+  and prints a `::error::`/`::warning::` annotation per finding so it shows up
+  on the PR diff. That — CI failure plus a GitHub annotation, no external
+  service — is the "ping alert" implemented here; a real Slack/email/webhook
+  integration needs credentials this environment doesn't have (see
+  [Next](#next)).

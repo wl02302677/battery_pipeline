@@ -35,6 +35,7 @@ TESTS_COLUMNS: tuple[str, ...] = (
     "test_id",
     "cycler",
     "source_path",
+    "source_hash",
     "start_offset_s",
     "rows_loaded",
     "rows_skipped",
@@ -56,6 +57,20 @@ TIMESERIES_COLUMNS: tuple[str, ...] = (
     "temperature_c",
     "capacity_ah",
     "cycle_index",
+)
+
+#: Columns of the ``data_quality_issues`` table. Not subject to the
+#: drift-rebuild below: it is an append-only audit log, not a reflection of
+#: source file content, so a schema change to `tests`/`timeseries` must never
+#: silently wipe its history.
+QUALITY_ISSUES_COLUMNS: tuple[str, ...] = (
+    "id",
+    "test_id",
+    "rule",
+    "severity",
+    "message",
+    "source_path",
+    "detected_at",
 )
 
 
@@ -240,6 +255,7 @@ class Database:
                 test_id TEXT PRIMARY KEY,
                 cycler TEXT NOT NULL,
                 source_path TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
                 start_offset_s {self._float_type},
                 rows_loaded INTEGER NOT NULL DEFAULT 0,
                 rows_skipped INTEGER NOT NULL DEFAULT 0,
@@ -275,5 +291,24 @@ class Database:
         self.execute(
             "CREATE INDEX IF NOT EXISTS ix_timeseries_test_cycle"
             " ON timeseries (test_id, cycle_index)"
+        )
+
+        # Deliberately outside the drift-rebuild above: see QUALITY_ISSUES_COLUMNS.
+        self.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS data_quality_issues (
+                id {self._serial_pk},
+                test_id TEXT,
+                rule TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                message TEXT NOT NULL,
+                source_path TEXT,
+                detected_at TEXT NOT NULL
+            )
+            """
+        )
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS ix_quality_issues_detected_at"
+            " ON data_quality_issues (detected_at)"
         )
         self.commit()

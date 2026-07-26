@@ -2,12 +2,17 @@
 
 The pipeline is a full reload per test: re-running it replaces a test's rows
 rather than appending to them, so `docker compose up` on a persisted PostgreSQL
-volume is safe to repeat.
+volume is safe to repeat. A file whose content hash matches what is already
+stored for its test is skipped entirely rather than reparsed, so a repeat run
+over an unchanged data directory does no real work; a newly added file is
+still found and loaded, since directory discovery walks the whole tree every
+run regardless of what is already in the database.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -47,6 +52,21 @@ def discover_files(root: Path) -> Iterator[Path]:
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES:
             yield path
+
+
+def file_hash(path: Path, chunk_size: int = 1 << 20) -> str:
+    """Hash a file's contents, streamed so a large export is never held twice
+    in memory at once (the parse below already holds one copy).
+
+    Content, not mtime, is the change signal: a bind-mounted volume can carry
+    a copied or checked-out file whose mtime moved without its bytes changing,
+    which would make an mtime check re-ingest every file on every run.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def read_raw_rows(path: Path) -> list[dict[str, Any]]:
@@ -133,21 +153,24 @@ def normalize_file(path: Path, cycler: str, test_id: str) -> tuple[list[dict[str
     return deduplicated, stats
 
 
-def _store_test(db: Database, test_id: str, cycler: str, path: Path, rows, stats: Counter) -> None:
+def _store_test(
+    db: Database, test_id: str, cycler: str, path: Path, source_hash: str, rows, stats: Counter
+) -> None:
     """Replace all stored data for one test inside the current transaction."""
     cycle_count = len({row["cycle_index"] for row in rows if row["cycle_index"] is not None})
 
     db.execute(
         """
         INSERT INTO tests (
-            test_id, cycler, source_path, start_offset_s,
+            test_id, cycler, source_path, source_hash, start_offset_s,
             rows_loaded, rows_skipped, rows_duplicated, rows_rescaled,
             first_timestamp_s, last_timestamp_s, cycle_count, ingested_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (test_id) DO UPDATE SET
             cycler = EXCLUDED.cycler,
             source_path = EXCLUDED.source_path,
+            source_hash = EXCLUDED.source_hash,
             start_offset_s = EXCLUDED.start_offset_s,
             rows_loaded = EXCLUDED.rows_loaded,
             rows_skipped = EXCLUDED.rows_skipped,
@@ -162,6 +185,7 @@ def _store_test(db: Database, test_id: str, cycler: str, path: Path, rows, stats
             test_id,
             cycler,
             str(path),
+            source_hash,
             stats.get("start_offset_s", 0.0),
             stats["rows_loaded"],
             stats["rows_skipped"],
@@ -233,6 +257,21 @@ def ingest_directory(
                 continue
 
             test_id = build_test_id(path, cycler=cycler)
+            digest = file_hash(path)
+
+            # A test already loaded from byte-identical content needs no
+            # reparsing: skip straight past the (comparatively expensive)
+            # parse-normalize-dedupe pass. A new file just has no row here yet,
+            # so it always falls through to a full ingest below — discovery
+            # walks the whole tree every run, so a newly added file is found
+            # without any separate "detect new files" step.
+            previous_hash = db.query_one(
+                "SELECT source_hash FROM tests WHERE test_id = ?", (test_id,)
+            )
+            if previous_hash is not None and previous_hash[0] == digest:
+                summary["files_unchanged"] += 1
+                logger.info("Unchanged since last ingest, skipping: %s", test_id)
+                continue
 
             try:
                 rows, stats = normalize_file(path, cycler=cycler, test_id=test_id)
@@ -253,7 +292,7 @@ def ingest_directory(
                 skipped_files.append(str(path))
                 continue
 
-            _store_test(db, test_id, cycler, path, rows, stats)
+            _store_test(db, test_id, cycler, path, digest, rows, stats)
             summary["tests_loaded"] += 1
             summary["rows_loaded"] += stats["rows_loaded"]
             logger.info(
@@ -269,6 +308,7 @@ def ingest_directory(
 
     result: dict[str, Any] = {
         "files_discovered": summary["files_discovered"],
+        "files_unchanged": summary["files_unchanged"],
         "files_skipped": summary["files_skipped"],
         "tests_loaded": summary["tests_loaded"],
         "rows_loaded": summary["rows_loaded"],

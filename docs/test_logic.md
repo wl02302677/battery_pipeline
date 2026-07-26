@@ -5,7 +5,7 @@ moment a test is added, so it now describes *what is covered and why* instead.
 The tests themselves are the specification.
 
 ```bash
-pytest                                   # 85 tests on SQLite, ~3s
+pytest                                   # 110 tests on SQLite, ~4s
 pytest tests/test_contract.py -v         # the normalization rules
 DATABASE_URL=postgresql://... pytest tests/test_postgres.py
 ```
@@ -25,6 +25,7 @@ rather than inspection. Loading and serving are comparatively mechanical.
 | `test_api.py` | Endpoint behaviour, pagination, filtering, status codes |
 | `test_api_errors.py` | Behaviour when the database is unreachable |
 | `test_postgres.py` | The same flows against real PostgreSQL; skipped unless `DATABASE_URL` is set |
+| `test_quality.py` | The contract/quality checks and the CI gate that runs them |
 
 Synthetic fixtures cover the rules; the bundled dataset covers the data as it
 actually is. Both matter — a synthetic file proves the rule, and the real file
@@ -58,9 +59,16 @@ missing required values, exact duplicates, an unparseable file, a file with no
 usable rows, a file outside any cycler directory. The counters are asserted too —
 "handled gracefully" has to mean reported, not swallowed.
 
-**Idempotency.** Ingesting twice produces an identical summary and no extra rows.
-This is not hypothetical: `docker compose up` re-runs the ETL against a persisted
-volume, and an append-only load doubles the data every time.
+**Idempotency and skip-unchanged.** Ingesting twice over unchanged files produces
+zero new rows and a summary that says so explicitly (`tests_loaded: 0`,
+`files_unchanged: N`) rather than merely matching the first run's numbers by
+coincidence — the two are distinguishable now, and the tests check the actual
+one (see `file_hash`'s dedicated stability/sensitivity test, plus the
+DB-level assertion that `ingested_at` is untouched by a no-op run). A modified
+file and a newly added file each get their own test, so "detect a change" and
+"detect an addition" are checked as two different code paths, not inferred
+from one one combined scenario. This is not hypothetical: `docker compose up`
+re-runs the ETL against a persisted volume on every start.
 
 **HTTP semantics.** 404 only for an unknown test; 200 with an empty array when a
 known test's filters match nothing; 422 for out-of-range pagination; 503 when the
@@ -105,6 +113,32 @@ produces a smooth curve, not a spiky one), Neware (confirms the "not reported"
 placeholder for the missing temperature channel, and that current reads in
 amps rather than the pre-fix microamps), and Novonix — against both the local
 SQLite path and the containerized PostgreSQL stack via `docker compose up`.
+
+## Data quality gate
+
+`test_quality.py` splits along the same line as the module it tests:
+
+- `check_contract`/`check_quality` are tested as pure functions against a
+  hand-built `Database` fixture — one test per rule, both the failing and the
+  passing case (a clean-rate test sits next to the high-skip-rate one, not just
+  the failure). `KNOWN_MISSING_OPTIONAL_FIELDS` gets its own pair: Neware's
+  missing temperature must **not** fire, and an unknown cycler's missing
+  temperature **must** — checking both directions is what actually verifies the
+  exclusion is doing something.
+- `quality_gate.run`/`main` are tested end to end against real files in
+  `tmp_path`, including one test that runs the gate against the actual bundled
+  `data/` directory and asserts **zero** findings — the regression guard that
+  matters most: it fails the moment a future data file or threshold change
+  makes the gate start crying wolf over the dataset's already-documented
+  quirks. A separate test fabricates a corrupt row (voltage in the thousands)
+  and checks the exit code, the `::error::` annotation text, and that the
+  finding landed in `data_quality_issues` — the three things a CI consumer,
+  a human reading the PR, and a later audit each depend on.
+- The gate was also run directly against a live, disposable PostgreSQL
+  container (not just SQLite) before wiring it into
+  `.github/workflows/tests.yml`, for the same reason `test_postgres.py` exists:
+  the SQL in `check_quality` is plain and portable, but "should work on both
+  backends" isn't the same claim as "was run against both."
 
 ## Choices worth knowing
 
