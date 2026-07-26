@@ -291,8 +291,9 @@ def test_a_file_with_no_usable_rows_creates_no_test_record(tmp_path):
 # -- idempotency ---------------------------------------------------------- #
 
 
-def test_reingesting_replaces_rows_instead_of_appending(tmp_path):
-    """`docker compose up` on a persisted volume re-runs the ETL."""
+def test_reingesting_unchanged_data_is_skipped_but_stays_correct(tmp_path):
+    """`docker compose up` on a persisted volume re-runs the ETL; an unchanged
+    file should be skipped rather than reparsed and reloaded."""
     data_root = tmp_path / "data"
     write_file(
         data_root,
@@ -305,7 +306,107 @@ def test_reingesting_replaces_rows_instead_of_appending(tmp_path):
     first = ingest_directory(data_root, db_path=db_path)
     second = ingest_directory(data_root, db_path=db_path)
 
-    assert first == second
+    assert first["tests_loaded"] == 1
+    assert first["files_unchanged"] == 0
+    assert second["tests_loaded"] == 0
+    assert second["files_unchanged"] == 1
+
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM timeseries").fetchone()[0] == 2
         assert conn.execute("SELECT COUNT(*) FROM tests").fetchone()[0] == 1
+
+
+def test_modifying_a_file_triggers_reingestion(tmp_path):
+    data_root = tmp_path / "data"
+    write_file(
+        data_root,
+        "cycler_b_neware",
+        "cell_001.csv",
+        NEWARE_HEADER + "0,3.6,0.004,1,0.02\n",
+    )
+    db_path = tmp_path / "battery.sqlite3"
+    ingest_directory(data_root, db_path=db_path)
+
+    write_file(
+        data_root,
+        "cycler_b_neware",
+        "cell_001.csv",
+        NEWARE_HEADER + "0,3.6,0.004,1,0.02\n1,3.99,0.004,1,0.03\n",
+    )
+    second = ingest_directory(data_root, db_path=db_path)
+
+    assert second["tests_loaded"] == 1
+    assert second["files_unchanged"] == 0
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT COUNT(*) FROM timeseries").fetchone()[0]
+        max_voltage = conn.execute("SELECT MAX(voltage_v) FROM timeseries").fetchone()[0]
+    assert rows == 2
+    assert max_voltage == pytest.approx(3.99)
+
+
+def test_a_new_file_is_loaded_without_reprocessing_existing_ones(tmp_path):
+    data_root = tmp_path / "data"
+    write_file(
+        data_root,
+        "cycler_b_neware",
+        "cell_001.csv",
+        NEWARE_HEADER + "0,3.6,0.004,1,0.02\n",
+    )
+    db_path = tmp_path / "battery.sqlite3"
+    ingest_directory(data_root, db_path=db_path)
+
+    write_file(
+        data_root,
+        "cycler_b_neware",
+        "cell_002.csv",
+        NEWARE_HEADER + "0,3.7,0.004,1,0.02\n",
+    )
+    second = ingest_directory(data_root, db_path=db_path)
+
+    assert second["files_discovered"] == 2
+    assert second["tests_loaded"] == 1  # only the new file
+    assert second["files_unchanged"] == 1  # cell_001 skipped, byte-identical
+    with sqlite3.connect(db_path) as conn:
+        test_ids = {row[0] for row in conn.execute("SELECT test_id FROM tests").fetchall()}
+    assert test_ids == {"neware_cell_001", "neware_cell_002"}
+
+
+def test_unchanged_test_keeps_its_original_ingested_at(tmp_path):
+    """`ingested_at` should mean 'last actually loaded', not 'last run seen'."""
+    data_root = tmp_path / "data"
+    write_file(
+        data_root,
+        "cycler_b_neware",
+        "cell_001.csv",
+        NEWARE_HEADER + "0,3.6,0.004,1,0.02\n",
+    )
+    db_path = tmp_path / "battery.sqlite3"
+    ingest_directory(data_root, db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        first_ingested_at = conn.execute("SELECT ingested_at FROM tests").fetchone()[0]
+
+    ingest_directory(data_root, db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        second_ingested_at = conn.execute("SELECT ingested_at FROM tests").fetchone()[0]
+
+    assert first_ingested_at == second_ingested_at
+
+
+def test_repository_ingest_reports_zero_unchanged_on_a_fresh_database(repo_db):
+    _, summary = repo_db
+    assert summary["files_unchanged"] == 0
+
+
+def test_file_hash_is_stable_and_content_sensitive(tmp_path):
+    from app.etl.pipeline import file_hash
+
+    path_a = tmp_path / "a.csv"
+    path_a.write_text("same content")
+    path_b = tmp_path / "b.csv"
+    path_b.write_text("same content")
+    path_c = tmp_path / "c.csv"
+    path_c.write_text("different content")
+
+    assert file_hash(path_a) == file_hash(path_b)
+    assert file_hash(path_a) != file_hash(path_c)
+    assert file_hash(path_a) == file_hash(path_a)  # stable across repeated calls

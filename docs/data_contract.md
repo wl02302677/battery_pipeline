@@ -117,9 +117,72 @@ Every drop is counted, and the counters land on the `tests` row so
 | `rows_duplicated` | Exact repeat of an earlier row |
 | `rows_rescaled` | Voltage converted from mV |
 | `files_skipped` | Unparseable, no usable rows, or outside a `cycler_*` directory |
+| `files_unchanged` | Content hash matched what was already stored; not reparsed |
 
 Per-row warnings are capped at five per file, followed by a total, so one bad
 file cannot bury the log.
+
+### Unchanged files are skipped by content hash
+
+Each file is hashed (SHA-256, streamed) before parsing. If a test's stored
+`source_hash` already matches, the file is skipped entirely — no reparse, no
+reload — and counted in `files_unchanged`. This is a content check, not an
+mtime check: a bind-mounted or freshly checked-out file can carry a new mtime
+with unchanged bytes, which would defeat an mtime-based skip on every run.
+
+A newly added file needs no separate detection step: directory discovery
+(`discover_files`) walks the whole tree on every run regardless of what is
+already loaded, so a file with no matching `test_id` in the database always
+falls through to a full ingest. The skip only ever applies to a `test_id`
+that's already present with an identical hash.
+
+One side effect worth knowing: `tests.ingested_at` now means "last actually
+loaded," not "last time the pipeline ran and saw this file" — an unchanged
+file's row is left untouched, timestamp included.
+
+Not handled: a file removed from `data/` leaves its test row in place. Nothing
+asked for that, and it's a reasonable next step rather than an oversight.
+
+## Data quality gate
+
+[app/etl/quality.py](../app/etl/quality.py) runs two checks after ingestion,
+turning findings into `Issue` records
+([app/etl/quality_gate.py](../app/etl/quality_gate.py) is the CLI/CI entry
+point that persists them and sets the exit code):
+
+- **`check_contract`** — did a file structurally satisfy the schema for its
+  cycler? It reuses `ingest_directory`'s own `skipped_file_paths`: a file that
+  produced zero usable rows already means every row failed on a required
+  field, which is a stronger signal than "some rows were blank" — `critical`.
+- **`check_quality`** — does what's already in the database look physically
+  plausible? Runs as SQL aggregates over `tests`/`timeseries`, not by
+  re-reading source files:
+
+  | Rule | Severity | Threshold |
+  |---|---|---|
+  | `high_skip_rate` | warning | `rows_skipped` > 10% of rows seen |
+  | `high_duplicate_rate` | warning | `rows_duplicated` > 5% of rows seen |
+  | `voltage_out_of_range` | critical | outside 0–5.5 V |
+  | `current_out_of_range` | critical | magnitude above 100 A |
+  | `temperature_out_of_range` | critical | outside -40–100 °C |
+  | `unexpected_missing_temperature` | warning | no temperature for any row, and the cycler isn't a documented exception |
+
+  `KNOWN_MISSING_OPTIONAL_FIELDS` currently holds `(neware, temperature_c)` —
+  Neware genuinely has no temperature channel (see above), so that gap is
+  excluded from the warning rather than re-flagging a defect the pipeline
+  already understands and reports through `rows_skipped`/`rows_rescaled`
+  elsewhere. Both checks were run against the bundled dataset before being
+  wired into CI specifically to confirm this: it produces zero findings.
+
+Every finding — warning or critical — is written to `data_quality_issues`
+(`app/db.py`), a durable, queryable record separate from the CI log. The
+thresholds above are module constants in `app/etl/quality.py`, chosen to be
+generous enough not to fire on the bundled dataset's genuine peculiarities
+while still catching a real corruption (e.g. an unrescaled millivolt reading,
+or a current column read in the wrong unit). Reusing the file/database-level
+checks the pipeline already computes, rather than adding new instrumentation,
+is deliberate: it's the same information `rows_skipped`/`rows_rescaled` already
+report, turned into a pass/fail gate with a persisted history.
 
 ## Adding a cycler
 

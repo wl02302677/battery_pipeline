@@ -60,15 +60,18 @@ def test_ingestion_loads_every_test(postgres_summary):
     assert postgres_summary["rows_loaded"] > 10_000
 
 
-def test_reingesting_into_postgres_is_idempotent():
-    """`docker compose up` re-runs the ETL against a persisted volume."""
-    first = ingest_directory(REPO_DATA, database_url=DATABASE_URL)
+def test_reingesting_into_postgres_is_idempotent(postgres_summary):
+    """`docker compose up` re-runs the ETL against a persisted volume; a
+    second run over unchanged files should do no reparsing or reloading."""
+    ingest_directory(REPO_DATA, database_url=DATABASE_URL)
     second = ingest_directory(REPO_DATA, database_url=DATABASE_URL)
 
-    assert first == second
+    assert second["tests_loaded"] == 0
+    assert second["files_unchanged"] == 12
+
     with Database.connect(database_url=DATABASE_URL) as db:
         total = db.query_one("SELECT COUNT(*) FROM timeseries")[0]
-    assert total == second["rows_loaded"]
+    assert total > 10_000
 
 
 def test_units_survive_the_postgres_round_trip(postgres_summary):

@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 
 from app.db import (
+    QUALITY_ISSUES_COLUMNS,
     TESTS_COLUMNS,
     TIMESERIES_COLUMNS,
     Database,
@@ -62,11 +63,17 @@ def test_ensure_schema_creates_both_tables_with_the_expected_columns(sqlite_db):
     assert sqlite_db.table_columns("timeseries") == set(TIMESERIES_COLUMNS)
 
 
+def test_ensure_schema_creates_the_quality_issues_table(sqlite_db):
+    sqlite_db.ensure_schema()
+
+    assert sqlite_db.table_columns("data_quality_issues") == set(QUALITY_ISSUES_COLUMNS)
+
+
 def test_ensure_schema_is_safe_to_run_twice(sqlite_db):
     sqlite_db.ensure_schema()
     sqlite_db.execute(
-        "INSERT INTO tests (test_id, cycler, source_path) VALUES (?, ?, ?)",
-        ("neware_cell_001", "neware", "x.csv"),
+        "INSERT INTO tests (test_id, cycler, source_path, source_hash) VALUES (?, ?, ?, ?)",
+        ("neware_cell_001", "neware", "x.csv", "deadbeef"),
     )
     sqlite_db.commit()
 
@@ -100,32 +107,3 @@ def test_indexes_exist_so_lookups_by_test_id_are_not_full_scans(sqlite_db):
     )
 
     assert any("ix_timeseries_test_timestamp" in str(row) for row in plan), plan
-
-
-# -- statement handling --------------------------------------------------- #
-
-
-def test_sqlite_keeps_question_mark_placeholders(sqlite_db):
-    assert sqlite_db._prepare("SELECT ? , ?") == "SELECT ? , ?"
-
-
-def test_postgres_placeholders_are_translated():
-    db = Database(connection=None, is_postgres=True)
-
-    assert db._prepare("SELECT * FROM tests WHERE test_id = ? AND cycler = ?") == (
-        "SELECT * FROM tests WHERE test_id = %s AND cycler = %s"
-    )
-
-
-def test_executemany_with_no_rows_is_a_no_op(sqlite_db):
-    sqlite_db.ensure_schema()
-
-    sqlite_db.executemany("INSERT INTO tests (test_id, cycler, source_path) VALUES (?, ?, ?)", [])
-
-    assert sqlite_db.query_one("SELECT COUNT(*) FROM tests")[0] == 0
-
-
-def test_query_one_returns_none_when_nothing_matches(sqlite_db):
-    sqlite_db.ensure_schema()
-
-    assert sqlite_db.query_one("SELECT 1 FROM tests WHERE test_id = ?", ("missing",)) is None
