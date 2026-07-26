@@ -9,22 +9,85 @@ on:
       - '**'
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+
+  # The default suite runs on SQLite, so it needs no services.
   test:
     runs-on: ubuntu-latest
-
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest
 
-      - name: Install dependencies
+  # Covers the backend the container runtime actually uses. Without this job the
+  # PostgreSQL code path is only exercised by `docker compose up`.
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: battery
+          POSTGRES_USER: battery
+          POSTGRES_PASSWORD: battery
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U battery -d battery"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://battery:battery@localhost:5432/battery
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Ingest the bundled dataset
+        run: python -m app.etl.pipeline --data-root data
+      - name: Run the PostgreSQL suite
+        run: pytest tests/test_postgres.py
+
+  # Proves the submission requirement: the stack comes up with one command.
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stack
+        run: docker compose up --build --detach --wait
+      - name: Check the API serves ingested data
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run tests
-        run: pytest -q
+          curl --fail --silent http://localhost:8000/health
+          curl --fail --silent http://localhost:8000/tests | head -c 400
+          curl --fail --silent "http://localhost:8000/tests/biologic_cell_001/timeseries?limit=1"
+          curl --fail --silent http://localhost:8000/tests/novonix_cell_001/cycles
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes

@@ -1,7 +1,5 @@
+# Runtime dependencies only; see requirements-dev.txt for the test tooling.
 pandas>=2.2.0
 fastapi>=0.111.0
 uvicorn>=0.30.0
-sqlalchemy>=2.0.0
-pytest>=8.3.0
-httpx>=0.27.0
 psycopg2-binary>=2.9.0

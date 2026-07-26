@@ -1,4 +1,10 @@
-version: "3.9"
+# Three services, started in order: database -> ETL -> API.
+#
+#   docker compose up --build
+#
+# The `etl` service runs to completion and exits; `api` waits for it, so the API
+# is never serving an empty database. Re-running the whole stack is safe: the ETL
+# replaces each test's rows rather than appending to them.
 services:
   db:
     image: postgres:16-alpine
@@ -6,26 +12,52 @@ services:
       POSTGRES_DB: battery
       POSTGRES_USER: battery
       POSTGRES_PASSWORD: battery
-      PGUSER: battery
-    ports:
-      - "5432:5432"
+    # Lets the other services wait on readiness instead of polling the port
+    # themselves. Postgres briefly accepts connections during init, so a plain
+    # TCP check is not enough.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U battery -d battery"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
     volumes:
       - postgres_data:/var/lib/postgresql/data
+
+  etl:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://battery:battery@db:5432/battery
+    volumes:
+      # Read-only: the ETL only ever reads the raw exports.
+      - ./data:/data:ro
+    command: ["python", "-m", "app.etl.pipeline", "--data-root", "/data"]
+    restart: "no"
 
   api:
     build: .
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      etl:
+        condition: service_completed_successfully
     ports:
       - "8000:8000"
-    volumes:
-      - .:/app
-      - ./data:/data
     environment:
       DATABASE_URL: postgresql://battery:battery@db:5432/battery
-      BATTERY_DB_PATH: /data/battery.sqlite3
-    command: >
-      sh -c "python -c \"import socket, time;\nimport sys;\nwhile True:\n    try:\n        with socket.create_connection(('db', 5432), timeout=2):\n            break\n    except OSError:\n        time.sleep(2)\n\" && python -c \"from app.etl.pipeline import ingest_directory; ingest_directory('/data')\" && python -m uvicorn app.api:app --host 0.0.0.0 --port 8000"
+    command: ["python", "-m", "uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      # The slim image has no curl, so probe with the stdlib.
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
 volumes:
   postgres_data:

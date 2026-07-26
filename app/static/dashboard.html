@@ -1,0 +1,783 @@
+<title>Battery Pipeline Dashboard</title>
+<div class="viz-root">
+  <style>
+    .viz-root {
+      color-scheme: light;
+      --surface-1: #fcfcfb;
+      --page: #f9f9f7;
+      --text-primary: #0b0b0b;
+      --text-secondary: #52514e;
+      --text-muted: #898781;
+      --gridline: #e1e0d9;
+      --baseline: #c3c2b7;
+      --border: rgba(11, 11, 11, 0.1);
+      --series-voltage: #2a78d6;
+      --series-current: #eb6834;
+      --series-temperature: #1baf7a;
+
+      background: var(--page);
+      color: var(--text-primary);
+      font-family:
+        system-ui,
+        -apple-system,
+        "Segoe UI",
+        sans-serif;
+      min-height: 100vh;
+      box-sizing: border-box;
+      padding: 24px clamp(16px, 4vw, 48px) 48px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:where(:not([data-theme="light"])) .viz-root {
+        color-scheme: dark;
+        --surface-1: #1a1a19;
+        --page: #0d0d0d;
+        --text-primary: #ffffff;
+        --text-secondary: #c3c2b7;
+        --text-muted: #898781;
+        --gridline: #2c2c2a;
+        --baseline: #383835;
+        --border: rgba(255, 255, 255, 0.1);
+        --series-voltage: #3987e5;
+        --series-current: #d95926;
+        --series-temperature: #199e70;
+      }
+    }
+    :root[data-theme="dark"] .viz-root {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --gridline: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255, 255, 255, 0.1);
+      --series-voltage: #3987e5;
+      --series-current: #d95926;
+      --series-temperature: #199e70;
+    }
+
+    .viz-root * {
+      box-sizing: border-box;
+    }
+
+    header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: 20px;
+      font-weight: 600;
+      margin: 0;
+    }
+    header p {
+      margin: 4px 0 0;
+      color: var(--text-secondary);
+      font-size: 13px;
+    }
+
+    button.icon-button {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--surface-1);
+      color: var(--text-secondary);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    button.icon-button:hover {
+      color: var(--text-primary);
+    }
+
+    .controls-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    select {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--surface-1);
+      color: var(--text-primary);
+      border-radius: 8px;
+      padding: 8px 32px 8px 12px;
+      font-size: 13px;
+      font-family: inherit;
+      min-width: 220px;
+    }
+    a.raw-link {
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    #error-banner {
+      background: var(--surface-1);
+      border: 1px solid var(--border);
+      border-left: 3px solid #d03b3b;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 13px;
+      color: var(--text-primary);
+      margin-bottom: 20px;
+    }
+
+    .content {
+      transition: opacity 0.15s ease;
+    }
+    .content.loading {
+      opacity: 0.5;
+      pointer-events: none;
+    }
+
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .stat-tile {
+      background: var(--surface-1);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .stat-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+    .stat-value {
+      font-size: 20px;
+      font-weight: 600;
+      margin-top: 4px;
+    }
+
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .chart-card {
+      background: var(--surface-1);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      position: relative;
+    }
+    .chart-card h2 {
+      font-size: 13px;
+      font-weight: 600;
+      margin: 0 0 8px;
+    }
+    .chart-card canvas {
+      width: 100%;
+      height: 200px;
+      display: block;
+      cursor: crosshair;
+    }
+
+    .tooltip {
+      position: fixed;
+      pointer-events: none;
+      background: var(--text-primary);
+      color: var(--surface-1);
+      font-size: 12px;
+      padding: 6px 9px;
+      border-radius: 6px;
+      transform: translate(-50%, -130%);
+      white-space: nowrap;
+      opacity: 0;
+      transition: opacity 0.1s ease;
+      z-index: 10;
+    }
+    .tooltip .tt-value {
+      font-weight: 600;
+    }
+    .tooltip .tt-time {
+      color: var(--text-muted);
+      margin-left: 6px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--surface-1);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      font-size: 13px;
+    }
+    th,
+    td {
+      text-align: right;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--gridline);
+      font-variant-numeric: tabular-nums;
+    }
+    th:first-child,
+    td:first-child {
+      text-align: left;
+      font-variant-numeric: normal;
+    }
+    th {
+      color: var(--text-muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      font-weight: 600;
+    }
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    section.section h2.section-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin: 0 0 10px;
+    }
+  </style>
+
+  <header>
+    <div>
+      <h1>Battery Pipeline Dashboard</h1>
+      <p>Normalized cycler data, served from the ETL output.</p>
+    </div>
+    <button class="icon-button" id="theme-toggle" type="button">Toggle theme</button>
+  </header>
+
+  <div class="controls-row">
+    <select id="test-select" aria-label="Select a test"></select>
+    <a class="raw-link" id="raw-link" href="#" target="_blank" rel="noopener">View raw JSON for this test</a>
+  </div>
+
+  <div id="error-banner" hidden></div>
+
+  <div class="content" id="content">
+    <div class="kpi-row" id="kpi-row"></div>
+
+    <div class="charts-grid">
+      <div class="chart-card">
+        <h2>Voltage (V)</h2>
+        <canvas id="chart-voltage"></canvas>
+      </div>
+      <div class="chart-card">
+        <h2>Current (A)</h2>
+        <canvas id="chart-current"></canvas>
+      </div>
+      <div class="chart-card">
+        <h2>Temperature (°C)</h2>
+        <canvas id="chart-temperature"></canvas>
+      </div>
+    </div>
+
+    <section class="section">
+      <h2 class="section-title">Cycle summary</h2>
+      <div style="overflow-x: auto">
+        <table id="cycles-table">
+          <thead>
+            <tr>
+              <th>Cycle</th>
+              <th>Samples</th>
+              <th>Duration (s)</th>
+              <th>Voltage (V)</th>
+              <th>Current (A)</th>
+              <th>Temperature (°C)</th>
+              <th>Capacity (Ah)</th>
+              <th>Charge (Ah)</th>
+              <th>Discharge (Ah)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script>
+  (() => {
+    "use strict";
+
+    const vizRoot = document.querySelector(".viz-root");
+    const contentEl = document.getElementById("content");
+    const errorBanner = document.getElementById("error-banner");
+    const testSelect = document.getElementById("test-select");
+    const rawLink = document.getElementById("raw-link");
+    const themeToggle = document.getElementById("theme-toggle");
+    const kpiRow = document.getElementById("kpi-row");
+    const cyclesTbody = document.querySelector("#cycles-table tbody");
+    const tooltipEl = document.getElementById("tooltip");
+
+    // -- theme -------------------------------------------------------- //
+
+    const THEME_KEY = "battery-dashboard-theme";
+
+    function applyStoredTheme() {
+      const saved = localStorage.getItem(THEME_KEY);
+      if (saved) document.documentElement.setAttribute("data-theme", saved);
+    }
+
+    themeToggle.addEventListener("click", () => {
+      const current =
+        document.documentElement.getAttribute("data-theme") ||
+        (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      const next = current === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem(THEME_KEY, next);
+      charts.forEach((chart) => chart.render());
+    });
+
+    applyStoredTheme();
+
+    function cssVar(name) {
+      return getComputedStyle(vizRoot).getPropertyValue(name).trim();
+    }
+
+    // -- number formatting ---------------------------------------------- //
+
+    function formatNumber(value, digits = 3) {
+      if (value === null || value === undefined) return "–";
+      return Number(value).toFixed(digits);
+    }
+
+    function formatRange(min, max, digits = 3) {
+      if (min === null || min === undefined || max === null || max === undefined) return "–";
+      return `${formatNumber(min, digits)} – ${formatNumber(max, digits)}`;
+    }
+
+    function formatCompact(value) {
+      if (value === null || value === undefined) return "–";
+      const abs = Math.abs(value);
+      if (abs >= 1000) return `${(value / 1000).toFixed(1)}k`;
+      return String(Math.round(value));
+    }
+
+    // -- nice ticks ------------------------------------------------------ //
+
+    function niceTicks(min, max, count) {
+      if (min === max) {
+        min -= 1;
+        max += 1;
+      }
+      const rawStep = (max - min) / count;
+      const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+      const normalized = rawStep / magnitude;
+      let step;
+      if (normalized < 1.5) step = magnitude;
+      else if (normalized < 3) step = 2 * magnitude;
+      else if (normalized < 7) step = 5 * magnitude;
+      else step = 10 * magnitude;
+
+      const niceMin = Math.floor(min / step) * step;
+      const niceMax = Math.ceil(max / step) * step;
+      const ticks = [];
+      for (let t = niceMin; t <= niceMax + step / 2; t += step) ticks.push(t);
+      return { ticks, min: niceMin, max: niceMax, step };
+    }
+
+    // Compact form (12.9k) only kicks in once values are large enough that a
+    // rounded integer is still meaningful; small measurements (volts, amps,
+    // degrees) need decimals sized to the tick spacing instead, or every tick
+    // in a narrow band (e.g. 3.8-4.1 V) rounds to the same integer.
+    function formatTickValue(value, step) {
+      if (Math.abs(value) >= 1000) return formatCompact(value);
+      const decimals = Math.max(0, Math.min(6, -Math.floor(Math.log10(step))));
+      return value.toFixed(decimals);
+    }
+
+    function formatTimeTick(seconds) {
+      if (Math.abs(seconds) >= 3600) return `${(seconds / 3600).toFixed(1)}h`;
+      if (Math.abs(seconds) >= 60) return `${(seconds / 60).toFixed(1)}m`;
+      return `${Math.round(seconds)}s`;
+    }
+
+    function bisectNearest(points, x) {
+      let lo = 0;
+      let hi = points.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (points[mid].x < x) lo = mid + 1;
+        else hi = mid;
+      }
+      if (lo > 0 && Math.abs(points[lo - 1].x - x) < Math.abs(points[lo].x - x)) return lo - 1;
+      return lo;
+    }
+
+    // -- line chart -------------------------------------------------- //
+
+    class LineChart {
+      constructor(canvas, { color, unit, digits }) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext("2d");
+        this.color = color;
+        this.unit = unit;
+        this.digits = digits;
+        this.points = [];
+        this.padding = { top: 10, right: 16, bottom: 24, left: 54 };
+        this._onResize = () => this.resize();
+        window.addEventListener("resize", this._onResize);
+        canvas.addEventListener("pointermove", (e) => this._onPointerMove(e));
+        canvas.addEventListener("pointerleave", () => {
+          this._hover = null;
+          this.render();
+          tooltipEl.style.opacity = 0;
+        });
+      }
+
+      setData(points) {
+        this.points = points;
+        this._hover = null;
+        this.resize();
+      }
+
+      resize() {
+        const dpr = window.devicePixelRatio || 1;
+        const rect = this.canvas.getBoundingClientRect();
+        this.cssWidth = rect.width;
+        this.cssHeight = rect.height;
+        this.canvas.width = Math.max(1, Math.round(rect.width * dpr));
+        this.canvas.height = Math.max(1, Math.round(rect.height * dpr));
+        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        this.render();
+      }
+
+      _scales() {
+        const { padding, points, cssWidth, cssHeight } = this;
+        const xs = points.map((p) => p.x);
+        const ys = points.map((p) => p.y);
+        const xMin = Math.min(...xs);
+        const xMax = Math.max(...xs);
+        const yRange = niceTicks(Math.min(...ys), Math.max(...ys), 4);
+        const plotW = cssWidth - padding.left - padding.right;
+        const plotH = cssHeight - padding.top - padding.bottom;
+        const xScale = (x) => padding.left + (xMax === xMin ? 0 : ((x - xMin) / (xMax - xMin)) * plotW);
+        const yScale = (y) =>
+          padding.top + plotH - (yRange.max === yRange.min ? 0 : ((y - yRange.min) / (yRange.max - yRange.min)) * plotH);
+        return { xMin, xMax, yRange, xScale, yScale, plotW, plotH, padding };
+      }
+
+      render() {
+        const ctx = this.ctx;
+        if (!this.cssWidth) return;
+        ctx.clearRect(0, 0, this.cssWidth, this.cssHeight);
+
+        if (!this.points.length) {
+          ctx.fillStyle = cssVar("--text-muted");
+          ctx.font = "13px system-ui, sans-serif";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+          ctx.fillText("Not reported for this cycler", this.padding.left, this.cssHeight / 2);
+          return;
+        }
+
+        const scales = this._scales();
+        this._scalesCache = scales;
+        const { yRange, xScale, yScale, padding, plotW, plotH } = scales;
+
+        ctx.strokeStyle = cssVar("--gridline");
+        ctx.fillStyle = cssVar("--text-muted");
+        ctx.font = "10px system-ui, sans-serif";
+        ctx.lineWidth = 1;
+        yRange.ticks.forEach((t) => {
+          const y = yScale(t);
+          if (y < padding.top - 1 || y > padding.top + plotH + 1) return;
+          ctx.beginPath();
+          ctx.moveTo(padding.left, Math.round(y) + 0.5);
+          ctx.lineTo(padding.left + plotW, Math.round(y) + 0.5);
+          ctx.stroke();
+          ctx.textAlign = "right";
+          ctx.textBaseline = "middle";
+          ctx.fillText(formatTickValue(t, yRange.step), padding.left - 8, y);
+        });
+
+        ctx.strokeStyle = cssVar("--baseline");
+        ctx.beginPath();
+        ctx.moveTo(padding.left, padding.top + plotH + 0.5);
+        ctx.lineTo(padding.left + plotW, padding.top + plotH + 0.5);
+        ctx.stroke();
+
+        // Only the two ends are labeled — a full time axis would need to dodge
+        // overlap with the gridline labels and the endpoint label, and the
+        // start/end plus the tooltip on hover already carry the scale.
+        ctx.fillStyle = cssVar("--text-muted");
+        ctx.font = "10px system-ui, sans-serif";
+        ctx.textBaseline = "top";
+        ctx.textAlign = "left";
+        ctx.fillText(formatTimeTick(scales.xMin), padding.left, padding.top + plotH + 6);
+        ctx.textAlign = "right";
+        ctx.fillText(formatTimeTick(scales.xMax), padding.left + plotW, padding.top + plotH + 6);
+
+        ctx.strokeStyle = this.color;
+        ctx.lineWidth = 2;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        this.points.forEach((p, i) => {
+          const x = xScale(p.x);
+          const y = yScale(p.y);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+
+        const last = this.points[this.points.length - 1];
+        this._drawMarker(xScale(last.x), yScale(last.y));
+
+        const label = `${formatNumber(last.y, this.digits)} ${this.unit}`;
+        ctx.font = "11px system-ui, sans-serif";
+        const lx = xScale(last.x);
+        const ly = yScale(last.y);
+        const fitsRight = lx + 8 + ctx.measureText(label).width < padding.left + plotW;
+        const labelX = lx + (fitsRight ? 8 : -8);
+        ctx.textAlign = fitsRight ? "left" : "right";
+        ctx.textBaseline = "middle";
+        // The value often lands right on a gridline (a test's last sample is
+        // frequently its max/min); a surface-colored backing keeps the text
+        // legible instead of reading as struck through by the line beneath it.
+        const textWidth = ctx.measureText(label).width;
+        const boxX = fitsRight ? labelX - 3 : labelX - textWidth - 3;
+        ctx.fillStyle = cssVar("--surface-1");
+        ctx.fillRect(boxX, ly - 7, textWidth + 6, 14);
+        ctx.fillStyle = cssVar("--text-secondary");
+        ctx.fillText(label, labelX, ly);
+
+        if (this._hover) this._drawCrosshair(this._hover, scales);
+      }
+
+      _drawMarker(x, y) {
+        const ctx = this.ctx;
+        ctx.fillStyle = cssVar("--surface-1");
+        ctx.beginPath();
+        ctx.arc(x, y, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(x, y, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      _drawCrosshair(point, scales) {
+        const ctx = this.ctx;
+        const { xScale, yScale, padding, plotH } = scales;
+        const x = xScale(point.x);
+        const y = yScale(point.y);
+        ctx.strokeStyle = cssVar("--baseline");
+        ctx.beginPath();
+        ctx.moveTo(Math.round(x) + 0.5, padding.top);
+        ctx.lineTo(Math.round(x) + 0.5, padding.top + plotH);
+        ctx.stroke();
+        this._drawMarker(x, y);
+      }
+
+      _onPointerMove(e) {
+        if (!this.points.length || !this._scalesCache) return;
+        const rect = this.canvas.getBoundingClientRect();
+        const { xScale, xMin, xMax, padding, plotW } = this._scalesCache;
+        const mouseX = e.clientX - rect.left;
+        const t = xMin + ((mouseX - padding.left) / plotW) * (xMax - xMin);
+        const idx = bisectNearest(this.points, t);
+        const point = this.points[idx];
+        if (!point) return;
+
+        this._hover = point;
+        this.render();
+
+        const x = xScale(point.x);
+        tooltipEl.style.left = `${rect.left + x}px`;
+        tooltipEl.style.top = `${e.clientY}px`;
+        tooltipEl.style.opacity = 1;
+        tooltipEl.innerHTML = "";
+        const valueSpan = document.createElement("span");
+        valueSpan.className = "tt-value";
+        valueSpan.textContent = `${formatNumber(point.y, this.digits)} ${this.unit}`;
+        const timeSpan = document.createElement("span");
+        timeSpan.className = "tt-time";
+        timeSpan.textContent = `t = ${formatNumber(point.x, 1)}s`;
+        tooltipEl.append(valueSpan, timeSpan);
+      }
+    }
+
+    const charts = [
+      new LineChart(document.getElementById("chart-voltage"), {
+        color: cssVar("--series-voltage") || "#2a78d6",
+        unit: "V",
+        digits: 3,
+      }),
+      new LineChart(document.getElementById("chart-current"), {
+        color: cssVar("--series-current") || "#eb6834",
+        unit: "A",
+        digits: 4,
+      }),
+      new LineChart(document.getElementById("chart-temperature"), {
+        color: cssVar("--series-temperature") || "#1baf7a",
+        unit: "°C",
+        digits: 2,
+      }),
+    ];
+    const [voltageChart, currentChart, temperatureChart] = charts;
+
+    // -- data loading -------------------------------------------------- //
+
+    function showError(message) {
+      errorBanner.textContent = message;
+      errorBanner.hidden = false;
+    }
+
+    function clearError() {
+      errorBanner.hidden = true;
+      errorBanner.textContent = "";
+    }
+
+    async function fetchJson(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        let detail = response.statusText;
+        try {
+          const body = await response.json();
+          if (body && body.detail) detail = body.detail;
+        } catch {
+          /* body wasn't JSON; keep the status text */
+        }
+        throw new Error(`${url} → ${response.status}: ${detail}`);
+      }
+      return response.json();
+    }
+
+    async function fetchAllTimeseries(testId) {
+      const points = [];
+      let offset = 0;
+      const limit = 5000;
+      for (;;) {
+        const page = await fetchJson(`/tests/${encodeURIComponent(testId)}/timeseries?limit=${limit}&offset=${offset}`);
+        points.push(...page.data);
+        if (page.next_offset === null || page.next_offset === undefined) break;
+        offset = page.next_offset;
+      }
+      return points;
+    }
+
+    function renderKpis(test) {
+      const tiles = [
+        ["Cycler", test.cycler],
+        ["Rows loaded", test.rows_loaded],
+        ["Rows skipped", test.rows_skipped],
+        ["Rows duplicated", test.rows_duplicated],
+        ["Rows rescaled", test.rows_rescaled],
+        ["Cycles", test.cycle_count],
+        ["Duration (s)", test.duration_s === null ? "–" : formatNumber(test.duration_s, 1)],
+      ];
+      kpiRow.innerHTML = "";
+      for (const [label, value] of tiles) {
+        const tile = document.createElement("div");
+        tile.className = "stat-tile";
+        const labelEl = document.createElement("div");
+        labelEl.className = "stat-label";
+        labelEl.textContent = label;
+        const valueEl = document.createElement("div");
+        valueEl.className = "stat-value";
+        valueEl.textContent = String(value);
+        tile.append(labelEl, valueEl);
+        kpiRow.appendChild(tile);
+      }
+    }
+
+    function renderCycles(cycles) {
+      cyclesTbody.innerHTML = "";
+      for (const cycle of cycles) {
+        const row = document.createElement("tr");
+        const cells = [
+          cycle.cycle_index,
+          cycle.sample_count,
+          formatNumber(cycle.duration_s, 1),
+          formatRange(cycle.min_voltage_v, cycle.max_voltage_v),
+          formatRange(cycle.min_current_a, cycle.max_current_a, 4),
+          formatRange(cycle.min_temperature_c, cycle.max_temperature_c, 1),
+          formatNumber(cycle.capacity_ah, 4),
+          formatNumber(cycle.charge_capacity_ah, 4),
+          formatNumber(cycle.discharge_capacity_ah, 4),
+        ];
+        cells.forEach((value) => {
+          const cell = document.createElement("td");
+          cell.textContent = String(value);
+          row.appendChild(cell);
+        });
+        cyclesTbody.appendChild(row);
+      }
+    }
+
+    async function loadTest(testId) {
+      contentEl.classList.add("loading");
+      clearError();
+      rawLink.href = `/tests/${encodeURIComponent(testId)}/timeseries?limit=5000`;
+
+      try {
+        const [test, points, cycles] = await Promise.all([
+          fetchJson(`/tests/${encodeURIComponent(testId)}`),
+          fetchAllTimeseries(testId),
+          fetchJson(`/tests/${encodeURIComponent(testId)}/cycles`),
+        ]);
+
+        renderKpis(test);
+        renderCycles(cycles);
+
+        voltageChart.setData(points.map((p) => ({ x: p.timestamp_s, y: p.voltage_v })));
+        currentChart.setData(points.map((p) => ({ x: p.timestamp_s, y: p.current_a })));
+        temperatureChart.setData(
+          points.filter((p) => p.temperature_c !== null).map((p) => ({ x: p.timestamp_s, y: p.temperature_c })),
+        );
+      } catch (err) {
+        showError(err.message || String(err));
+      } finally {
+        contentEl.classList.remove("loading");
+      }
+    }
+
+    async function init() {
+      try {
+        const tests = await fetchJson("/tests");
+        if (!tests.length) {
+          showError("No tests have been ingested yet. Run the ETL pipeline, then reload this page.");
+          return;
+        }
+
+        const byCycler = new Map();
+        for (const test of tests) {
+          if (!byCycler.has(test.cycler)) byCycler.set(test.cycler, []);
+          byCycler.get(test.cycler).push(test);
+        }
+
+        testSelect.innerHTML = "";
+        for (const [cycler, group] of byCycler) {
+          const optgroup = document.createElement("optgroup");
+          optgroup.label = cycler;
+          for (const test of group) {
+            const option = document.createElement("option");
+            option.value = test.test_id;
+            option.textContent = test.test_id;
+            optgroup.appendChild(option);
+          }
+          testSelect.appendChild(optgroup);
+        }
+
+        testSelect.addEventListener("change", () => loadTest(testSelect.value));
+        await loadTest(tests[0].test_id);
+      } catch (err) {
+        showError(err.message || String(err));
+      }
+    }
+
+    init();
+  })();
+</script>
