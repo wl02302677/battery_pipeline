@@ -1,134 +1,277 @@
-# Battery Pipeline Prototype
+# Battery Pipeline
 
-This repository contains a local ETL prototype for battery cycler data.
+An ETL pipeline and REST API for battery cycler data. It ingests raw exports from
+three different cyclers, normalizes them into one schema, loads them into
+PostgreSQL, and serves them over HTTP.
 
-## What it does
+The task brief that this repository answers is in [docs/brief.md](docs/brief.md).
 
-- Ingests raw exports from the three provided cycler folders
-- Normalizes each row into a shared schema
-- Persists the data in a local SQLite database
-- Exposes the data through a lightweight FastAPI service
-- Skips malformed rows without failing the whole run and reports them in the ingestion summary
-
-## Run locally
-
-```bash
-python -m pip install -r requirements.txt
-python -c "from app.etl.pipeline import ingest_directory; ingest_directory('data', db_path='battery.sqlite3')"
-uvicorn app.api:app --reload
-```
-
-Then open:
-- http://localhost:8000/tests
-- http://localhost:8000/tests/biologic_cell_001/timeseries
-- http://localhost:8000/tests/novonix_cell_001/cycles
-
-## Run with Docker Compose
+## Quick start
 
 ```bash
 docker compose up --build
 ```
 
-The container will ingest the data from the local data folder into /data/battery.sqlite3 and expose the API on port 8000.
+That starts PostgreSQL, waits for it to be healthy, runs the ETL to completion,
+then starts the API. No other setup is needed.
+
+Open <http://localhost:8000/> for the dashboard, or use the API directly:
+
+```bash
+curl localhost:8000/health
+curl localhost:8000/tests
+curl "localhost:8000/tests/biologic_cell_001/timeseries?limit=5"
+curl localhost:8000/tests/novonix_cell_001/cycles
+```
+
+Interactive docs: <http://localhost:8000/docs>
+
+### Running locally without Docker
+
+Falls back to SQLite, so no database server is required:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m app.etl.pipeline --data-root data --db-path battery.sqlite3
+BATTERY_DB_PATH=battery.sqlite3 python -m uvicorn app.api:app --reload
+```
+
+### Tests
+
+```bash
+pytest                                  # the full suite, on SQLite
+ruff check . && ruff format --check .    # lint
+
+# Also exercise the PostgreSQL path (otherwise these tests skip):
+DATABASE_URL=postgresql://battery:battery@localhost:5432/battery pytest tests/test_postgres.py
+```
+
+## Architecture
+
+```
+data/cycler_*/            raw exports, one file per test
+  |
+  v
+app/etl/contract.py       per-cycler column map, units, identity, repairs
+app/etl/pipeline.py       discover -> normalize -> validate -> dedupe -> rebase -> load
+  |
+  v
+app/db.py                 PostgreSQL or SQLite behind one interface
+  |
+  v
+app/api.py                FastAPI read layer
+```
+
+| File | Responsibility |
+|---|---|
+| [app/etl/contract.py](app/etl/contract.py) | Which source column maps to which field, in which unit. All normalization rules live here. |
+| [app/etl/pipeline.py](app/etl/pipeline.py) | File discovery, row validation, de-duplication, time rebasing, batched loading. |
+| [app/db.py](app/db.py) | Schema definition and the one place the two backends differ. |
+| [app/api.py](app/api.py) | HTTP endpoints and response models. |
+| [app/static/dashboard.html](app/static/dashboard.html) | Optional visualization dashboard, served at `/`. |
+
+`DATABASE_URL` selects the backend. When it is unset the code falls back to a
+local SQLite file, which is what the test suite and the local workflow use — the
+same code path otherwise.
+
+## Schema
+
+`tests` — one row per source file, plus the ingestion counters the API exposes:
+
+| Column | Notes |
+|---|---|
+| `test_id` | Primary key, e.g. `biologic_cell_001` |
+| `cycler` | `biologic`, `neware`, `novonix` |
+| `source_path` | Provenance: which file produced this test |
+| `start_offset_s` | Raw source clock at the start of the test (see [time rebasing](#3-timestamps-are-rebased-per-test)) |
+| `rows_loaded`, `rows_skipped`, `rows_duplicated`, `rows_rescaled` | Per-test data quality counters |
+| `first_timestamp_s`, `last_timestamp_s`, `cycle_count` | Denormalized so `GET /tests` needs no aggregation |
+| `ingested_at` | When this test was last loaded |
+
+`timeseries` — one row per sample:
+
+| Column | Unit |
+|---|---|
+| `test_id` | FK to `tests` |
+| `timestamp_s` | seconds since the start of the test |
+| `voltage_v` | volts |
+| `current_a` | amps (positive = charge) |
+| `temperature_c` | Celsius, null when the cycler does not report it |
+| `capacity_ah` | amp-hours |
+| `cycle_index` | integer, null when absent |
+
+Indexed on `(test_id, timestamp_s)` and `(test_id, cycle_index)` — every API
+query filters by `test_id`, so without these each request is a full scan.
+
+## Dashboard
+
+`GET /` serves a single-page dashboard (`app/static/dashboard.html`) — plain
+JS and `<canvas>`, no build step and no external dependency, so it needs
+nothing beyond what `docker compose up` already runs. It:
+
+- lists every test grouped by cycler in a dropdown;
+- plots voltage, current and temperature against time as three separate
+  charts, never sharing an axis — voltage and current live on genuinely
+  different scales, and a dual-axis chart makes that relationship look
+  meaningful when it is really just two unrelated scales sharing a canvas;
+- shows a crosshair-and-tooltip on hover, and a per-test KPI row (rows loaded,
+  skipped, duplicated, rescaled, cycle count, duration);
+- renders the per-cycle table from `GET .../cycles`;
+- supports light and dark mode (`prefers-color-scheme`, with a manual toggle).
+
+Temperature is plotted as "not reported" rather than a blank chart for Neware,
+which has no temperature channel. A "view raw JSON" link next to the test
+picker is the escape hatch to the full, unrounded values behind any chart.
+
+It was built and checked with Playwright against a headless Chromium browser
+(both themes, all three cyclers, hover interaction, zero console errors) — see
+[docs/test_logic.md](docs/test_logic.md#dashboard) for how.
+
+## API
+
+| Endpoint | Notes |
+|---|---|
+| `GET /` | The dashboard above. |
+| `GET /health` | Backend in use and number of loaded tests. Used by the compose healthcheck. |
+| `GET /tests` | All tests with their cycler and quality counters. `?cycler=neware` to filter. |
+| `GET /tests/{test_id}` | One test's summary. |
+| `GET /tests/{test_id}/timeseries` | Paginated samples. `limit` (default 1000, max 50000), `offset`, `start_s`, `end_s`, `cycle_index`. |
+| `GET /tests/{test_id}/cycles` | Per-cycle statistics: duration, min/max voltage, current and temperature, and capacity split by current direction. |
+
+`/timeseries` returns a page envelope rather than a bare array, because a client
+needs to know whether more data exists:
+
+```json
+{ "test_id": "novonix_cell_001", "total": 201, "returned": 50,
+  "limit": 50, "offset": 0, "next_offset": 50, "data": [ ... ] }
+```
+
+Status codes: `404` means the `test_id` does not exist; a known test whose
+filters match nothing returns `200` with an empty `data` array. `503` means the
+database is unreachable. Out-of-range pagination parameters return `422`.
 
 ## Assumptions and handling rules
 
-- Test IDs are derived from the file path, such as biologic_cell_001 or neware_cell_003.
-- Units are normalized where practical: mA is converted to A and hours are converted to seconds.
-- Missing or malformed values are skipped rather than failing the entire run.
-- The ETL uses SQLite for a simple local-first setup, which is sufficient for the prototype and interview scenario.
-- Rows without a usable timestamp, voltage, or current are omitted from the database and counted as skipped.
+### 1. Units are declared per column, not per field
 
-## Verification
+Each cycler names its columns differently *and* uses different units. The unit is
+declared next to the column name it belongs to, in `COLUMN_MAP`:
 
-Run the test suite with:
+| Field | BioLogic | Neware | Novonix |
+|---|---|---|---|
+| time | `time/s` (s) | `Time [s]` (s) | `Run Time (h)` (**hours**) |
+| voltage | `voltage_measured` | `Voltage [V]` | `cell_voltage` |
+| current | `I/mA` (**mA**) | `Current [A]` (A) | `Current (A)` (A) |
+| capacity | `Capacity/mA.h` (**mAh**) | `Capacity [Ah]` (Ah) | `Capacity (Ah)` (Ah) |
+| temperature | `Temperature/°C` | *not exported* | `Temperature (°C)` |
+| cycle | `cycle number` | `Cycle` | `Cycle Number` |
 
-```bash
-pytest -q
+Only BioLogic reports milliamps and milliamp-hours; only Novonix reports hours.
+Attaching the unit to the column is what prevents a conversion being applied to
+the wrong cycler.
+
+Adding a cycler means adding an entry to `COLUMN_MAP` and a `cycler_<x>_<name>`
+directory. The cycler name is derived from the directory, so no parsing code
+changes.
+
+### 2. BioLogic mixes volts and millivolts in one column
+
+210 of the 1397 rows in `cycler_a_biologic/cell_001.txt` report voltage as
+`3517.94` where the rest report `3.51`. Any reading above 100 V is treated as
+millivolts and divided by 1000; the affected rows are counted in `rows_rescaled`
+and flagged individually during normalization. The 100 V threshold suits
+single-cell data and would need raising for module or pack level data.
+
+### 3. Timestamps are rebased per test
+
+`timestamp_s` is defined as seconds since the start of the test, but the ten
+Neware files share one lab clock: `cell_010` starts near 540,277 s. Each test is
+rebased so its first sample is `0`, and the original offset is kept in
+`tests.start_offset_s` so the source ordering is not lost.
+
+### 4. Rows must have time, voltage and current
+
+A row missing any of the three is dropped and counted in `rows_skipped`
+(83 rows across the dataset). Requiring current keeps the per-cycle
+charge/discharge summaries meaningful. That is a deliberate trade-off: 6 Novonix
+rows have a valid voltage but no current, and they are discarded. Temperature,
+capacity and cycle index are optional and stored as `NULL` when absent.
+
+Skipped rows are reported per test through the API rather than only logged, so
+the loss is visible without reading container logs.
+
+### 5. Exact duplicate rows are dropped
+
+`neware_cell_003` repeats 20 rows verbatim, including their timestamps, and
+`cell_009` repeats one. A repeated timestamp is an export defect rather than a
+real re-measurement, so duplicates are dropped and counted in `rows_duplicated`.
+
+### 6. Other handling
+
+- **Non-monotonic time.** Two Neware files are not time-ordered; rows are sorted
+  on ingest, so `id` order matches time order.
+- **Corrupted headers.** The BioLogic temperature column arrives as
+  `Temperature/ï¿½C` — UTF-8 bytes that were decoded as latin-1. Headers are
+  matched after a repair attempt and after stripping non-alphanumerics.
+- **Whole-file failures.** An unparseable file is logged and skipped; the run
+  continues and reports it in `files_skipped`.
+- **Files outside a `cycler_*` directory** are skipped, since neither the parser
+  nor a unique test ID can be determined.
+- **Re-ingestion is idempotent.** Each test's rows are replaced, not appended, so
+  re-running `docker compose up` against a persisted volume does not double the
+  data.
+- **Capacity** is taken from each cycler's capacity channel. Per-cycle capacity is
+  the span of that channel within the cycle, split by current sign — not
+  coulomb-counted from current.
+
+### Ingestion summary for the bundled dataset
+
+```
+files_discovered  12      rows_loaded      11525
+tests_loaded      12      rows_skipped        83   (missing time, voltage or current)
+files_skipped      0      rows_duplicated     21   (exact repeats)
+                          rows_rescaled      168   (mV written into a volts column)
 ```
 
-The repository also includes a GitHub Actions workflow that runs the tests on push and pull requests.
+## CI
 
----
+[.github/workflows/tests.yml](.github/workflows/tests.yml) runs on every push and
+pull request:
 
-## Part 1 — Build the pipeline
-
-### 1. ETL pipeline
-
-Write a pipeline that reads all files across all three cycler folders and loads them into a database.
-
-Note that `cell_001` appears in more than one cycler folder. Use a **test ID** derived from the file path to uniquely identify each test — for example `biologic_cell_001` or `neware_cell_003`. This becomes the primary key for the API.
-
-The pipeline should map each file to a common schema containing at least:
-
-| Field | Type | Notes |
-|---|---|---|
-| `test_id` | string | Derived from file path, e.g. `biologic_cell_001` |
-| `cycler` | string | `biologic`, `neware`, or `novonix` |
-| `timestamp_s` | float | Seconds since test start |
-| `voltage_v` | float | Volts |
-| `current_a` | float | Amps |
-| `temperature_c` | float | Celsius — include if present in source |
-| `cycle_index` | int | Include if present in source |
-
-Document any assumptions you make about units or how you handle missing or malformed data.
-
-### 2. Database
-
-Store the normalised data in a database of your choice (PostgreSQL recommended).
-
-### 3. REST API
-
-Build a REST API on top of the database with at least these endpoints:
-
-| Endpoint | Description |
+| Job | What it covers |
 |---|---|
-| `GET /tests` | List all available test IDs and their cycler source |
-| `GET /tests/{test_id}/timeseries` | Return time, voltage, current, and temperature for a test |
-| `GET /tests/{test_id}/cycles` | Return per-cycle summary statistics (e.g. capacity, min/max voltage) |
+| `lint` | `ruff check` and `ruff format --check` |
+| `test` | The suite on Python 3.11 and 3.12 (SQLite) |
+| `test-postgres` | Ingest plus API against a real PostgreSQL service |
+| `compose` | `docker compose up --wait`, then curls the endpoints |
 
-### 4. Frontend (optional)
+`test-postgres` exists because the rest of the suite runs on SQLite; without it
+the backend used in production would only be exercised by hand.
 
-Build a simple dashboard that visualises the data from one or more tests. Focus on the pipeline and API first — this is a bonus.
+## What I would do next
 
----
+Roughly in priority order:
 
-## Part 2 — Interview discussion
-
-During the interview you will have **15 minutes to walk through your code**, followed by questions. We're interested in:
-
-- The decisions you made and why
-- How your pipeline handles errors and edge cases
-- What you would do next with more time
-
-Come prepared to discuss your schema design, how you'd scale the pipeline to handle many more files and cycler types, and how you'd detect and surface data quality issues automatically.
-
-### Stretch goal — CI/CD (optional)
-
-Add a GitHub Actions workflow that runs your tests on every push. We use GitLab CI internally — be ready to discuss how you'd adapt it.
-
----
-
-## Submission checklist
-
-Before the interview, make sure your repo includes:
-
-- [ ] Working ETL pipeline
-- [ ] Working API (with the `/tests` endpoints above)
-- [ ] A `docker-compose.yml` that starts everything with `docker-compose up` — no further setup or configuration should be required to run your solution
-- [ ] A README in your repo explaining any non-obvious decisions or assumptions
-
----
-
-## Evaluation criteria
-
-| Criterion | What we look for |
-|---|---|
-| **Schema design** | Does the common schema make sense for time-series battery data? Could it scale? |
-| **Pipeline robustness** | Does it handle missing values, bad rows, and unit inconsistencies gracefully? |
-| **API design** | Sensible endpoints, correct HTTP semantics, some thought about filtering large datasets |
-| **Code quality** | Readable, structured, evidence of testability |
-| **Prioritisation** | What did you choose to finish vs. leave rough — and did you document why? |
-| **Ownership** | Can you explain every part of what you submitted, including AI-assisted code? |
-
-Good luck — and please reach out if you have any questions.
+1. **Schema migrations.** `ensure_schema` currently rebuilds the tables when it
+   detects a column mismatch. That is fine while the data is a reproducible load
+   of files in the repo, and wrong as soon as it is not — Alembic instead.
+2. **Streaming ingestion.** Files are read into memory in full. Chunking through
+   `pandas.read_csv(chunksize=...)` and `COPY` instead of `INSERT` would let this
+   handle files that do not fit in RAM, and would be much faster on PostgreSQL.
+3. **Connection pooling.** The API opens a connection per request. Fine at this
+   size, wasteful under load.
+4. **Parallel ingestion.** Files are independent, so ingestion is embarrassingly
+   parallel — one worker per file, or per cycler directory.
+5. **Server-side downsampling** on `/timeseries` — the dashboard currently pages
+   through every sample, which is fine at ~1000 rows per test and would not be
+   at 1M; a LTTB or stride-based downsample parameter is the fix.
+6. **Explicit data quality rules.** `rows_skipped` / `rows_rescaled` /
+   `rows_duplicated` are the beginning of this. The next step is thresholds that
+   fail a run or raise an alert: voltage outside the chemistry window, sampling
+   gaps, capacity moving in the wrong direction for the current sign.
+7. **Partitioning `timeseries` by test or time** once it is large, and an
+   `ingested_files` table keyed by content hash so unchanged files are skipped.
+8. **Dashboard: overlay multiple tests.** Useful for comparing cells side by
+   side; would need the single-series-per-chart layout to grow a legend once a
+   chart holds more than one series (see the dataviz notes in
+   [docs/test_logic.md](docs/test_logic.md#dashboard)).
