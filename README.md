@@ -8,6 +8,7 @@ This repository contains a local ETL prototype for battery cycler data.
 - Normalizes each row into a shared schema
 - Persists the data in a local SQLite database
 - Exposes the data through a lightweight FastAPI service
+- Skips malformed rows without failing the whole run and reports them in the ingestion summary
 
 ## Run locally
 
@@ -36,11 +37,17 @@ The container will ingest the data from the local data folder into /data/battery
 - Units are normalized where practical: mA is converted to A and hours are converted to seconds.
 - Missing or malformed values are skipped rather than failing the entire run.
 - The ETL uses SQLite for a simple local-first setup, which is sufficient for the prototype and interview scenario.
+- Rows without a usable timestamp, voltage, or current are omitted from the database and counted as skipped.
 
-- Rows that cannot be parsed
-- Other surprises
+## Verification
 
-Your pipeline should handle these gracefully.
+Run the test suite with:
+
+```bash
+pytest -q
+```
+
+The repository also includes a GitHub Actions workflow that runs the tests on push and pull requests.
 
 ---
 
