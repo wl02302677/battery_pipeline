@@ -1,0 +1,13 @@
+version: "3.9"
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./data:/data
+    environment:
+      BATTERY_DB_PATH: /data/battery.sqlite3
+    command: >
+      sh -c "python -c \"from app.etl.pipeline import ingest_directory; ingest_directory('/data', db_path='/data/battery.sqlite3')\" && python -m uvicorn app.api:app --host 0.0.0.0 --port 8000"

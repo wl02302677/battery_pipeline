@@ -1,43 +1,42 @@
-# Breathe Batteries — Data Engineer Tech Test
+# Battery Pipeline Prototype
 
-Thank you for taking the time to complete this task. We're excited to be at this stage with you.
+This repository contains a local ETL prototype for battery cycler data.
 
----
+## What it does
 
-## Before you start
+- Ingests raw exports from the three provided cycler folders
+- Normalizes each row into a shared schema
+- Persists the data in a local SQLite database
+- Exposes the data through a lightweight FastAPI service
 
-- Spend **no more than 4 hours** on this. The scope is deliberately ambitious — we expect you to use AI tools to get through it. During the interview we'll ask you to walk through your code, so make sure you can explain every decision.
-- Push your solution to a **public GitHub repository** before the interview. Share the link with us ahead of time.
-- **Python is preferred**, but you may use any stack you're comfortable with.
-- You do not need to spin up any cloud infrastructure. Everything should run locally on your machine.
+## Run locally
 
----
+```bash
+python -m pip install -r requirements.txt
+python -c "from app.etl.pipeline import ingest_directory; ingest_directory('data', db_path='battery.sqlite3')"
+uvicorn app.api:app --reload
+```
 
-## Context
+Then open:
+- http://localhost:8000/tests
+- http://localhost:8000/tests/biologic_cell_001/timeseries
+- http://localhost:8000/tests/novonix_cell_001/cycles
 
-Breathe's internal platform, **Nexus**, ingests time-series data from battery cyclers across our lab. Each cycler manufacturer exports data in its own proprietary format — different column names, different units, different file structures. A core part of our platform is the pipeline that reads these raw exports, normalises them into a common schema, and stores them for analysis and reporting.
+## Run with Docker Compose
 
-Your task is to build a simplified version of that pipeline.
+```bash
+docker compose up --build
+```
 
----
+The container will ingest the data from the local data folder into /data/battery.sqlite3 and expose the API on port 8000.
 
-## The data
+## Assumptions and handling rules
 
-The `data/` folder contains raw exports from **three different battery cyclers**:
+- Test IDs are derived from the file path, such as biologic_cell_001 or neware_cell_003.
+- Units are normalized where practical: mA is converted to A and hours are converted to seconds.
+- Missing or malformed values are skipped rather than failing the entire run.
+- The ETL uses SQLite for a simple local-first setup, which is sufficient for the prototype and interview scenario.
 
-| Folder | Cycler | Format | Files |
-|---|---|---|---|
-| `data/cycler_a_biologic/` | BioLogic SP-150 | Tab-separated text | 1 file |
-| `data/cycler_b_neware/` | Neware BTS4000 | CSV | 10 files |
-| `data/cycler_c_novonix/` | Novonix UHPC | CSV | 1 file |
-
-Each file represents a single battery test. The data includes some or all of: time, voltage, current, temperature, capacity, cycle index.
-
-These are **real-world-style exports** — they have not been pre-cleaned. You should expect:
-
-- Different column names for the same physical quantity across cyclers
-- Possible unit inconsistencies within or between files
-- Missing values
 - Rows that cannot be parsed
 - Other surprises
 
