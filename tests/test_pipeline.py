@@ -44,6 +44,7 @@ def test_ingest_directory_handles_repository_cyclers(tmp_path):
 
     assert summary["tests_loaded"] == 12
     assert summary["rows_loaded"] > 100
+    assert summary["rows_skipped"] >= 0
 
     with sqlite3.connect(db_path) as conn:
         cycler_counts = dict(conn.execute("SELECT cycler, COUNT(*) FROM tests GROUP BY cycler").fetchall())
@@ -62,3 +63,25 @@ def test_ingest_directory_handles_repository_cyclers(tmp_path):
     assert abs(novonix_row[0] - 1.28016) < 1e-6
     assert novonix_row[1] > 0
     assert novonix_row[2] > 0
+
+
+def test_ingest_directory_skips_rows_with_missing_required_values(tmp_path):
+    data_root = tmp_path / "data"
+    cycler_dir = data_root / "cycler_a_biologic"
+    cycler_dir.mkdir(parents=True)
+
+    sample_file = cycler_dir / "cell_002.txt"
+    sample_file.write_text(
+        "time/s\tvoltage_measured\tI/mA\tTemperature/°C\tcycle number\n"
+        "0\t3.2\t500\t25\t1\n"
+        "1\tbad\t450\t24\t1\n"
+        "2\t3.1\t\t24\t1\n",
+        encoding="utf-8",
+    )
+
+    db_path = tmp_path / "battery.sqlite3"
+    summary = ingest_directory(data_root, db_path=db_path)
+
+    assert summary["tests_loaded"] == 1
+    assert summary["rows_loaded"] == 1
+    assert summary["rows_skipped"] == 2

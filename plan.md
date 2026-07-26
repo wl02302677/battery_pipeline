@@ -28,7 +28,8 @@ Handle malformed rows gracefully by dropping them and recording a summary of ski
 5. Define the database model
 Create a relational schema with at least a tests table and a timeseries table.
 Make test_id the stable identifier used throughout the API.
-Use a local database first for speed, but keep the connection layer container-friendly.
+Switch to PostgreSQL for the main runtime so the service matches a production-style deployment, while keeping SQLite as a lightweight fallback for local tests.
+Use environment-based configuration via DATABASE_URL and a container-friendly connection layer.
 6. Implement the API
 Build a lightweight REST API with:
 GET /tests
@@ -47,3 +48,11 @@ Run the ETL locally and confirm that all files are ingested.
 Verify that the database contains rows for every discovered test.
 Exercise each API endpoint and confirm the response structure.
 Run the test suite and ensure it passes before handing off the work.
+
+
+TODO: 
+0. the postgresql should be created first, and then in the docker, run the pipeline to ingest files, transform, and then save into postgreSQL
+Then last step is run the api to query from postgreSQL
+1. catch error message, like web error code
+<!-- 2. simple front-end
+3. document generated automically -->

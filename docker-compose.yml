@@ -1,13 +1,31 @@
 version: "3.9"
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: battery
+      POSTGRES_USER: battery
+      POSTGRES_PASSWORD: battery
+      PGUSER: battery
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   api:
     build: .
+    depends_on:
+      - db
     ports:
       - "8000:8000"
     volumes:
       - .:/app
       - ./data:/data
     environment:
+      DATABASE_URL: postgresql://battery:battery@db:5432/battery
       BATTERY_DB_PATH: /data/battery.sqlite3
     command: >
-      sh -c "python -c \"from app.etl.pipeline import ingest_directory; ingest_directory('/data', db_path='/data/battery.sqlite3')\" && python -m uvicorn app.api:app --host 0.0.0.0 --port 8000"
+      sh -c "python -c \"import socket, time;\nimport sys;\nwhile True:\n    try:\n        with socket.create_connection(('db', 5432), timeout=2):\n            break\n    except OSError:\n        time.sleep(2)\n\" && python -c \"from app.etl.pipeline import ingest_directory; ingest_directory('/data')\" && python -m uvicorn app.api:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  postgres_data:
