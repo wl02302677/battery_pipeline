@@ -1,3 +1,10 @@
+"""Tests for the FastAPI endpoints in app/api.py.
+
+Runs against a real SQLite database ingested once (see `ingested_db` below)
+from the bundled sample data in data/, so every test exercises the actual
+endpoint behaviour rather than mocked responses.
+"""
+
 from pathlib import Path
 
 import pytest
@@ -11,6 +18,7 @@ REPO_DATA = Path(__file__).resolve().parents[1] / "data"
 
 @pytest.fixture(scope="module")
 def ingested_db(tmp_path_factory):
+    """Ingest the bundled dataset once and reuse it for every test in this file."""
     db_path = tmp_path_factory.mktemp("api") / "battery.sqlite3"
     ingest_directory(REPO_DATA, db_path=db_path)
     return db_path
@@ -18,6 +26,7 @@ def ingested_db(tmp_path_factory):
 
 @pytest.fixture
 def client(ingested_db, monkeypatch):
+    """A FastAPI test client pointed at the ingested database above."""
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("BATTERY_DB_PATH", str(ingested_db))
     return TestClient(app)
@@ -26,12 +35,12 @@ def client(ingested_db, monkeypatch):
 # -- meta ----------------------------------------------------------------- #
 
 
-def test_health_reports_the_backend_and_test_count(client):
+def test_health_reports_the_backend_and_test_count(client, repo_test_count):
     payload = client.get("/health").json()
 
     assert payload["status"] == "ok"
     assert payload["backend"] == "sqlite"
-    assert payload["tests"] == 12
+    assert payload["tests"] == repo_test_count
 
 
 def test_root_serves_the_dashboard(client):
@@ -45,12 +54,12 @@ def test_root_serves_the_dashboard(client):
 # -- /tests --------------------------------------------------------------- #
 
 
-def test_list_tests_returns_every_test_with_its_cycler(client):
+def test_list_tests_returns_every_test_with_its_cycler(client, repo_test_count):
     response = client.get("/tests")
     assert response.status_code == 200
     payload = response.json()
 
-    assert len(payload) == 12
+    assert len(payload) == repo_test_count
     assert {item["cycler"] for item in payload} == {"biologic", "neware", "novonix"}
     assert [item["test_id"] for item in payload] == sorted(item["test_id"] for item in payload)
 
@@ -66,10 +75,10 @@ def test_list_tests_surfaces_data_quality_counters(client):
     assert biologic["duration_s"] > 0
 
 
-def test_list_tests_can_filter_by_cycler(client):
+def test_list_tests_can_filter_by_cycler(client, repo_cycler_counts):
     payload = client.get("/tests", params={"cycler": "neware"}).json()
 
-    assert len(payload) == 10
+    assert len(payload) == repo_cycler_counts["neware"]
     assert {item["cycler"] for item in payload} == {"neware"}
 
 

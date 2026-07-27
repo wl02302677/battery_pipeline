@@ -26,6 +26,7 @@ import psycopg2
 
 logger = logging.getLogger(__name__)
 
+# URL prefixes used to tell the two backends apart.
 SQLITE_SCHEME = "sqlite:///"
 POSTGRES_SCHEMES = ("postgresql://", "postgres://")
 
@@ -87,10 +88,13 @@ def build_database_url(db_path: str | None = None) -> str:
     ``db_path``, then ``BATTERY_DB_PATH``, then a default in the working
     directory.
     """
+    # An explicit DATABASE_URL (set by docker-compose.yml) always takes
+    # priority, regardless of what db_path was passed in.
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         return database_url
 
+    # No PostgreSQL configured, so fall back to a SQLite file on disk.
     resolved_db_path = Path(db_path or os.getenv("BATTERY_DB_PATH", "battery.sqlite3")).resolve()
     return f"sqlite:///{resolved_db_path}"
 
@@ -112,6 +116,9 @@ def connect_database(database_url: str, retries: int = 10, delay_seconds: float 
     if not is_postgres_url(database_url):
         return None
 
+    # Retry loop: on startup the Postgres container may not be accepting
+    # connections yet, so keep trying with a short pause instead of failing
+    # on the very first attempt.
     last_error: BaseException | None = None
     for attempt in range(max(retries, 1)):
         try:
@@ -119,6 +126,7 @@ def connect_database(database_url: str, retries: int = 10, delay_seconds: float 
         except psycopg2.OperationalError as exc:
             last_error = exc
             if attempt == max(retries, 1) - 1:
+                # Out of retries — let the caller see the real error.
                 raise
             logger.warning("Database not ready (attempt %s/%s): %s", attempt + 1, retries, exc)
             time.sleep(delay_seconds)
@@ -127,7 +135,13 @@ def connect_database(database_url: str, retries: int = 10, delay_seconds: float 
 
 
 class Database:
-    """Thin wrapper over a DB-API connection that hides backend differences."""
+    """Thin wrapper over a DB-API connection that hides backend differences.
+
+    Every method here accepts SQL written with ``?`` placeholders, the SQLite
+    style. When the connection is PostgreSQL, `_prepare` rewrites them to
+    ``%s`` before the statement reaches the driver, so calling code never has
+    to branch on which backend it is talking to.
+    """
 
     def __init__(self, connection: Any, is_postgres: bool) -> None:
         self.connection = connection
@@ -144,11 +158,13 @@ class Database:
         delay_seconds: float = 2.0,
     ) -> Database:
         """Open a connection to whichever backend is configured."""
+        # Work out which database URL to use if the caller didn't pass one.
         url = database_url or build_database_url(db_path=str(db_path) if db_path else None)
 
         if is_postgres_url(url):
             return cls(connect_database(url, retries=retries, delay_seconds=delay_seconds), True)
 
+        # SQLite: make sure the parent folder exists, then open the file.
         path = sqlite_path_from_url(url)
         path.parent.mkdir(parents=True, exist_ok=True)
         return cls(sqlite3.connect(path), False)
@@ -160,13 +176,16 @@ class Database:
         return statement.replace("?", "%s") if self.is_postgres else statement
 
     def execute(self, statement: str, params: Sequence[Any] = ()) -> Any:
+        """Run one SQL statement and return its cursor (for INSERT/UPDATE/DDL)."""
         cursor = self.connection.cursor()
         cursor.execute(self._prepare(statement), tuple(params))
         return cursor
 
     def executemany(self, statement: str, rows: Iterable[Sequence[Any]]) -> None:
+        """Run the same statement once per row, e.g. a batch of INSERTs."""
         batch = [tuple(row) for row in rows]
         if not batch:
+            # Nothing to insert — skip opening a cursor for an empty batch.
             return
         cursor = self.connection.cursor()
         try:
@@ -175,6 +194,7 @@ class Database:
             cursor.close()
 
     def query(self, statement: str, params: Sequence[Any] = ()) -> list[tuple]:
+        """Run a SELECT and return every matching row."""
         cursor = self.execute(statement, params)
         try:
             return cursor.fetchall()
@@ -182,6 +202,7 @@ class Database:
             cursor.close()
 
     def query_one(self, statement: str, params: Sequence[Any] = ()) -> tuple | None:
+        """Run a SELECT and return the first row, or None if there isn't one."""
         cursor = self.execute(statement, params)
         try:
             return cursor.fetchone()
@@ -189,15 +210,19 @@ class Database:
             cursor.close()
 
     def commit(self) -> None:
+        """Commit the current transaction."""
         self.connection.commit()
 
     def close(self) -> None:
+        """Close the underlying connection, ignoring any error while doing so."""
         try:
             self.connection.close()
         except Exception:  # pragma: no cover - closing should never break callers
             logger.debug("Ignoring error while closing the database connection", exc_info=True)
 
     def __enter__(self) -> Database:
+        # Lets callers write `with Database.connect(...) as db:` and have the
+        # connection closed automatically at the end of the block.
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -207,10 +232,12 @@ class Database:
 
     @property
     def _float_type(self) -> str:
+        """The floating-point column type for whichever backend this is."""
         return "DOUBLE PRECISION" if self.is_postgres else "REAL"
 
     @property
     def _serial_pk(self) -> str:
+        """The auto-incrementing primary key syntax for whichever backend this is."""
         return "BIGSERIAL PRIMARY KEY" if self.is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
     def table_columns(self, table: str) -> set[str]:
@@ -234,12 +261,16 @@ class Database:
         a column mismatch and rebuilds both tables. Ingestion is a full reload
         of the source files, so nothing that cannot be regenerated is lost.
         """
+        # Check whether the tables that already exist (if any) still match the
+        # columns this version of the code expects.
         drifted = [
             table
             for table, expected in (("tests", TESTS_COLUMNS), ("timeseries", TIMESERIES_COLUMNS))
             if (columns := self.table_columns(table)) and columns != set(expected)
         ]
         if drifted:
+            # Schema changed since these tables were created — drop and let
+            # the CREATE TABLE statements below rebuild them from scratch.
             logger.warning(
                 "Existing schema for %s does not match the current model; recreating both tables",
                 ", ".join(drifted),
@@ -249,6 +280,7 @@ class Database:
             self.execute("DROP TABLE IF EXISTS tests")
             self.commit()
 
+        # One row per source file, plus the ingestion counters the API exposes.
         self.execute(
             f"""
             CREATE TABLE IF NOT EXISTS tests (
@@ -268,6 +300,7 @@ class Database:
             )
             """
         )
+        # One row per normalized sample.
         self.execute(
             f"""
             CREATE TABLE IF NOT EXISTS timeseries (

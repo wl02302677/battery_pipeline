@@ -1,3 +1,10 @@
+"""Tests for how the API behaves when the database is unreachable.
+
+Points DATABASE_URL at a port nothing is listening on, so every request fails
+to connect the same way it would if PostgreSQL were down — this checks that
+failure is reported as a clean 503, not a 500 or a hang.
+"""
+
 import time
 
 import pytest
@@ -11,6 +18,7 @@ UNREACHABLE_DATABASE_URL = "postgresql://bad:bad@127.0.0.1:5599/battery"
 
 @pytest.fixture
 def client(monkeypatch):
+    """A test client configured to always fail to reach the database."""
     monkeypatch.setenv("DATABASE_URL", UNREACHABLE_DATABASE_URL)
     return TestClient(app)
 

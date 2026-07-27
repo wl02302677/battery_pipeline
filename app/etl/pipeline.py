@@ -34,6 +34,7 @@ from app.etl.contract import (
 
 logger = logging.getLogger(__name__)
 
+# Only these two file types are recognised as cycler exports.
 SUPPORTED_SUFFIXES = frozenset({".csv", ".txt"})
 
 #: Tab-separated for BioLogic, comma-separated for the others.
@@ -49,6 +50,8 @@ MAX_SKIP_WARNINGS_PER_FILE = 5
 
 def discover_files(root: Path) -> Iterator[Path]:
     """Yield supported data files under ``root`` in a deterministic order."""
+    # Sorting keeps runs reproducible: the same files always come back in the
+    # same order, which makes logs and test output easy to compare.
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES:
             yield path
@@ -63,6 +66,7 @@ def file_hash(path: Path, chunk_size: int = 1 << 20) -> str:
     which would make an mtime check re-ingest every file on every run.
     """
     digest = hashlib.sha256()
+    # Read in fixed-size chunks rather than the whole file at once.
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(chunk_size), b""):
             digest.update(chunk)
@@ -97,6 +101,8 @@ def normalize_file(path: Path, cycler: str, test_id: str) -> tuple[list[dict[str
     raw_rows = read_raw_rows(path)
     stats["rows_read"] = len(raw_rows)
 
+    # Step 1: convert every raw row to the common schema, and drop any row
+    # that is missing a required field (time, voltage, or current).
     usable: list[dict[str, Any]] = []
     for raw_row in raw_rows:
         row = normalize_timeseries_row(raw_row, cycler=cycler, test_id=test_id)
@@ -111,6 +117,8 @@ def normalize_file(path: Path, cycler: str, test_id: str) -> tuple[list[dict[str
         usable.append(row)
 
     if stats["rows_skipped"] > MAX_SKIP_WARNINGS_PER_FILE:
+        # Avoid flooding the log with one line per skipped row; just report
+        # the total instead once the per-file cap is passed.
         logger.warning(
             "Skipped %s rows in total for %s (%s warnings suppressed)",
             stats["rows_skipped"],
@@ -118,9 +126,10 @@ def normalize_file(path: Path, cycler: str, test_id: str) -> tuple[list[dict[str
             stats["rows_skipped"] - MAX_SKIP_WARNINGS_PER_FILE,
         )
 
-    # Exact duplicate samples appear in some exports (neware cell_003 repeats 20
-    # rows, including their timestamps). Identical timestamps are a defect, not
-    # a real re-measurement, so the repeats are dropped.
+    # Step 2: drop exact duplicate rows (same value in every field, including
+    # the timestamp). Exact duplicate samples appear in some exports (neware
+    # cell_003 repeats 20 rows, including their timestamps). Identical
+    # timestamps are a defect, not a real re-measurement.
     deduplicated: list[dict[str, Any]] = []
     seen: set[tuple] = set()
     for row in usable:
@@ -131,14 +140,16 @@ def normalize_file(path: Path, cycler: str, test_id: str) -> tuple[list[dict[str
         seen.add(key)
         deduplicated.append(row)
 
-    # A few files are not time-ordered; sorting makes `ORDER BY id` in the API
-    # equivalent to time order and keeps per-cycle start/end times correct.
+    # Step 3: sort by time. A few files are not time-ordered; sorting makes
+    # `ORDER BY id` in the API equivalent to time order and keeps per-cycle
+    # start/end times correct.
     deduplicated.sort(key=lambda row: row["timestamp_s"])
 
-    # `timestamp_s` is defined as seconds since the start of the test, but the
-    # neware exports share one lab clock across files (cell_010 starts near
-    # 540,277 s). Rebase each test to zero and keep the original offset on the
-    # `tests` row so nothing is lost.
+    # Step 4: rebase time to zero. `timestamp_s` is defined as seconds since
+    # the start of the test, but the neware exports share one lab clock across
+    # files (cell_010 starts near 540,277 s). Shift each test so its first
+    # sample reads 0, and keep the original offset on the `tests` row so
+    # nothing is lost.
     if deduplicated:
         offset = deduplicated[0]["timestamp_s"]
         stats["start_offset_s"] = offset
@@ -157,8 +168,11 @@ def _store_test(
     db: Database, test_id: str, cycler: str, path: Path, source_hash: str, rows, stats: Counter
 ) -> None:
     """Replace all stored data for one test inside the current transaction."""
+    # Count the distinct cycle numbers seen, ignoring rows with no cycle index.
     cycle_count = len({row["cycle_index"] for row in rows if row["cycle_index"] is not None})
 
+    # Upsert the summary row: insert if this test_id is new, otherwise update
+    # every column in place (covers both a first load and a reload).
     db.execute(
         """
         INSERT INTO tests (
@@ -198,9 +212,12 @@ def _store_test(
         ),
     )
 
-    # Makes re-ingestion idempotent instead of doubling every row.
+    # Delete this test's old rows before inserting the new ones. Makes
+    # re-ingestion idempotent instead of doubling every row.
     db.execute("DELETE FROM timeseries WHERE test_id = ?", (test_id,))
 
+    # Insert the new rows in fixed-size batches rather than all at once, so a
+    # very large file does not build one huge parameter list.
     statement = """
         INSERT INTO timeseries (
             test_id, timestamp_s, voltage_v, current_a, temperature_c, capacity_ah, cycle_index
@@ -244,6 +261,7 @@ def ingest_directory(
     with Database.connect(database_url=database_url, db_path=db_path) as db:
         db.ensure_schema()
 
+        # Walk every supported file under the data root, one at a time.
         for path in discover_files(root_path):
             summary["files_discovered"] += 1
 
@@ -287,6 +305,8 @@ def ingest_directory(
             summary["rows_rescaled"] += stats["rows_rescaled"]
 
             if not rows:
+                # Every row in this file failed validation — nothing usable
+                # to store, so don't create a test record for it at all.
                 logger.warning("No usable rows in %s; not creating a test record", path)
                 summary["files_skipped"] += 1
                 skipped_files.append(str(path))
@@ -306,6 +326,7 @@ def ingest_directory(
 
         db.commit()
 
+    # Build the final summary dict returned to the caller / printed by the CLI.
     result: dict[str, Any] = {
         "files_discovered": summary["files_discovered"],
         "files_unchanged": summary["files_unchanged"],
@@ -322,6 +343,7 @@ def ingest_directory(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Command-line entry point: ``python -m app.etl.pipeline``."""
     parser = argparse.ArgumentParser(
         description="Ingest raw battery cycler exports into the database.",
     )
@@ -353,6 +375,8 @@ def main(argv: list[str] | None = None) -> int:
         db_path=args.db_path,
         database_url=args.database_url,
     )
+    # Print the summary as JSON so it's easy to read in a terminal or parse
+    # in a CI log.
     print(json.dumps(summary, indent=2))
     return 0
 

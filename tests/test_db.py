@@ -1,3 +1,8 @@
+"""Tests for app/db.py: URL resolution, schema creation, and the ? -> %s
+placeholder translation that lets the same SQL run against SQLite or
+PostgreSQL.
+"""
+
 import sqlite3
 
 import pytest
@@ -51,6 +56,7 @@ def test_is_postgres_url(url, expected):
 
 @pytest.fixture
 def sqlite_db(tmp_path, monkeypatch):
+    """A fresh, empty SQLite database for schema tests."""
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with Database.connect(db_path=tmp_path / "battery.sqlite3") as db:
         yield db

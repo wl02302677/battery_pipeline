@@ -1,3 +1,10 @@
+"""Tests for the ETL orchestration in app/etl/pipeline.py.
+
+Covers file discovery, hashing/skip-unchanged, normalization end to end,
+de-duplication, time rebasing, and error handling — using both small
+hand-written files and the real bundled dataset in data/.
+"""
+
 import sqlite3
 from pathlib import Path
 
@@ -12,6 +19,7 @@ NEWARE_HEADER = "Time [s],Voltage [V],Current [A],Cycle,Capacity [Ah]\n"
 
 
 def write_file(root: Path, cycler_dir: str, name: str, content: str) -> Path:
+    """Write a small synthetic cycler export, creating the cycler_* folder if needed."""
     directory = root / cycler_dir
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
@@ -61,11 +69,11 @@ def test_ingest_directory_creates_timeseries_rows(tmp_path):
     assert series_rows[0][5] == 1
 
 
-def test_ingest_directory_handles_repository_cyclers(repo_db):
+def test_ingest_directory_handles_repository_cyclers(repo_db, repo_test_count, repo_cycler_counts):
     db_path, summary = repo_db
 
-    assert summary["files_discovered"] == 12
-    assert summary["tests_loaded"] == 12
+    assert summary["files_discovered"] == repo_test_count
+    assert summary["tests_loaded"] == repo_test_count
     assert summary["rows_loaded"] > 100
 
     with sqlite3.connect(db_path) as conn:
@@ -81,7 +89,7 @@ def test_ingest_directory_handles_repository_cyclers(repo_db):
             " WHERE test_id = 'novonix_cell_001' ORDER BY timestamp_s LIMIT 2"
         ).fetchall()[1]
 
-    assert cycler_counts == {"biologic": 1, "neware": 10, "novonix": 1}
+    assert cycler_counts == repo_cycler_counts
     assert biologic_row[1] > 0
     assert biologic_row[3] > 0
     assert novonix_row[0] == pytest.approx(1.28016)

@@ -1,3 +1,10 @@
+"""Tests for the normalization rules in app/etl/contract.py.
+
+This is where the real bugs found in the raw data live, so it's the most
+heavily tested module: per-cycler unit conversion, identity, header matching,
+and the value repairs (millivolt rescaling, corrupted headers).
+"""
+
 import pytest
 
 from app.etl.contract import (
