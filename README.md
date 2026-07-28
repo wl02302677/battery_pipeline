@@ -192,11 +192,24 @@ and pull request:
 
 ## What I would do next
 
-1. Databricks Medalion framework, Event-driven: AutoLoader, Unity Catalog for meta data control, DLT for data quality control, Z-ordering/Liquid for partition improvement, Quality Dashboard by Ontos
-2. IaC
-3. More configuration
-4. **Real alerting** for the quality gate (Slack/email/webhook) once
-   credentials exist.
-5. **More quality rules** — sampling gaps, capacity drifting against current
-   sign, per-cycler rather than global plausibility windows.
-6. Auto-generated document, i.e. api spec
+1. Databricks Architecture & Data Governance
+
+   - Medallion Architecture:
+     * Bronze: Auto Loader for incremental, schema-evolution-safe file streaming.
+     * Silver: DLT (Delta Live Tables) with Expectations converted from contract.py.
+     * Gold: Analytical aggregates for SOH/SOC models.
+   - Performance: Liquid Clustering over `cell_id` and `timestamp` (replacing manual Z-Ordering).
+   - Governance: Unity Catalog for fine-grained access, Data Lineage, and Audit logs.
+2. Advanced Battery-Domain Quality Gates
+
+   - Dynamic per-cycler validation windows (e.g., custom voltage thresholds per cell chemistry/equipment type instead of static global bounds).
+   - Sampling gap detection and automatic interpolation flags.
+3. Production Operations (Ops & CI/CD)
+
+   - Real-time Alerting: Integration with Slack/Email/PagerDuty for CRITICAL contract failures.
+   - Infrastructure as Code (IaC): Terraform for workspace, storage, and pipeline provisioning.
+   - Data Contract CI/CD: Automated schema drift and breaking change detection on GitHub PRs.
+4. Developer Experience & Observability
+
+   - Auto-generated API specs (OpenAPI/FastAPI) and Data Catalog documentation.
+   - Integrated Data Observability Dashboard (Databricks Lakeview / Grafana).
