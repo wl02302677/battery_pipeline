@@ -19,8 +19,8 @@ docker compose up --build
 Starts PostgreSQL, waits for it to be healthy, runs the ETL to completion,
 then starts the API. No other setup is needed.
 
-- Dashboard: <http://localhost:8000/>
-- Interactive API docs: <http://localhost:8000/docs>
+- Dashboard: [http://localhost:8000/](http://localhost:8000/)
+- Interactive API docs: [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ```bash
 curl localhost:8000/health
@@ -95,14 +95,15 @@ Full column-by-column rationale: [docs/data_contract.md](docs/data_contract.md).
 
 ## API
 
-| Endpoint | Notes |
-|---|---|
-| `GET /` | The dashboard. |
-| `GET /health` | Backend in use and test count; used by the compose healthcheck. |
-| `GET /tests` | All tests, with cycler and quality counters. `?cycler=neware` to filter. |
-| `GET /tests/{test_id}` | One test's summary. |
+
+| Endpoint                          | Notes                                                                                                 |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `GET /`                           | The dashboard.                                                                                        |
+| `GET /health`                     | Backend in use and test count; used by the compose healthcheck.                                       |
+| `GET /tests`                      | All tests, with cycler and quality counters.`?cycler=neware` to filter.                               |
+| `GET /tests/{test_id}`            | One test's summary.                                                                                   |
 | `GET /tests/{test_id}/timeseries` | Paginated (`limit`/`offset`, default 1000, max 50000), filterable by `start_s`/`end_s`/`cycle_index`. |
-| `GET /tests/{test_id}/cycles` | Per-cycle stats: duration, min/max voltage/current/temperature, capacity split by current direction. |
+| `GET /tests/{test_id}/cycles`     | Per-cycle stats: duration, min/max voltage/current/temperature, capacity split by current direction.  |
 
 `/timeseries` returns `{total, returned, limit, offset, next_offset, data}` —
 a page envelope, not a bare array, so a client knows whether more data exists.
@@ -180,24 +181,23 @@ at the PR. A real Slack/email/webhook integration is a follow-up (see
 [.github/workflows/tests.yml](.github/workflows/tests.yml) runs on every push
 and pull request:
 
-| Job | What it covers |
-|---|---|
-| `lint` | `ruff check` and `ruff format --check` |
-| `test` | The suite on Python 3.11 and 3.12 (SQLite) |
-| `test-postgres` | Ingest plus API against a real PostgreSQL service |
-| `data-quality` | The [quality gate](#data-quality-gate); fails the PR on a critical finding |
-| `compose` | `docker compose up --wait`, then curls the endpoints |
+
+| Job             | What it covers                                                            |
+| --------------- | ------------------------------------------------------------------------- |
+| `lint`          | `ruff check` and `ruff format --check`                                    |
+| `test`          | The suite on Python 3.11 and 3.12 (SQLite)                                |
+| `test-postgres` | Ingest plus API against a real PostgreSQL service                         |
+| `data-quality`  | The[quality gate](#data-quality-gate); fails the PR on a critical finding |
+| `compose`       | `docker compose up --wait`, then curls the endpoints                      |
 
 ## What I would do next
 
-1. **Schema migrations** (Alembic) instead of the current rebuild-on-drift.
+1. Databricks Medalion framework, Event-driven: AutoLoader, Unity Catalog for meta data control, DLT for data quality control, Z-ordering/Liquid for partition improvement, Quality Dashboard by Ontos
 2. **Streaming ingestion** (`chunksize` + `COPY`) so file size isn't RAM-bound.
-3. **Connection pooling** — the API opens one connection per request.
-4. **Parallel ingestion** — files are independent.
-5. **Server-side downsampling** on `/timeseries` for very long tests.
-6. **Real alerting** for the quality gate (Slack/email/webhook) once
+3. IaC
+4. More configuration
+5. **Real alerting** for the quality gate (Slack/email/webhook) once
    credentials exist.
-7. **More quality rules** — sampling gaps, capacity drifting against current
+6. **More quality rules** — sampling gaps, capacity drifting against current
    sign, per-cycler rather than global plausibility windows.
-8. **Partition `timeseries`** by test or time once it's large.
-9. **Dashboard: overlay multiple tests** for side-by-side comparison.
+7. Auto-generated document, i.e. api spec
