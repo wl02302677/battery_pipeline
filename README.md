@@ -193,11 +193,10 @@ and pull request:
 ## What I would do next
 
 1. Databricks Medalion framework, Event-driven: AutoLoader, Unity Catalog for meta data control, DLT for data quality control, Z-ordering/Liquid for partition improvement, Quality Dashboard by Ontos
-2. **Streaming ingestion** (`chunksize` + `COPY`) so file size isn't RAM-bound.
-3. IaC
-4. More configuration
-5. **Real alerting** for the quality gate (Slack/email/webhook) once
+2. IaC
+3. More configuration
+4. **Real alerting** for the quality gate (Slack/email/webhook) once
    credentials exist.
-6. **More quality rules** — sampling gaps, capacity drifting against current
+5. **More quality rules** — sampling gaps, capacity drifting against current
    sign, per-cycler rather than global plausibility windows.
-7. Auto-generated document, i.e. api spec
+6. Auto-generated document, i.e. api spec
