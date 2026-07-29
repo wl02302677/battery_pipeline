@@ -1,9 +1,33 @@
 # Data contract
 
-The authoritative version of these rules is
-[app/etl/contract.py](../app/etl/contract.py) — this document explains the
-reasoning behind them. The README summarises the same assumptions for a reader
-who only wants to run the thing.
+The authoritative version of the schema itself — canonical fields, per-cycler
+column mappings, target table layouts — is the declarative YAML under
+[schema/](../schema/); see [Schema files](#schema-files) below.
+[app/etl/contract.py](../app/etl/contract.py) loads and applies it (the
+normalization logic: unit conversion, value repairs, header matching). This
+document explains the reasoning behind the rules. The README summarises the
+same assumptions for a reader who only wants to run the thing.
+
+## Schema files
+
+```
+schema/
+  canonical_fields.yaml       # normalized field order, required-ness, canonical unit
+  sources/<cycler>.yaml       # per-cycler: canonical field -> ordered (column, unit) candidates
+  targets/<table>.yaml        # tests / timeseries / data_quality_issues: columns, types, indexes
+```
+
+Loaded once at import time by [app/schema_loader.py](../app/schema_loader.py)
+— `app/etl/contract.py` derives `VALUE_FIELDS`/`REQUIRED_FIELDS`/
+`TARGET_UNITS`/`COLUMN_MAP` from it, `app/db.py` derives
+`TESTS_COLUMNS`/`TIMESERIES_COLUMNS`/`QUALITY_ISSUES_COLUMNS` and the
+`CREATE TABLE`/`CREATE INDEX` statements from it. Every file is validated
+against a Pydantic model on load; a missing file, invalid YAML, or a field
+that doesn't match the expected shape raises `SchemaError` and aborts before
+any ingestion runs — a broken contract cannot silently degrade into a partial
+or mis-parsed load. `UNIT_CONVERSIONS` (the ms→s, mA→A, ... table) stays a
+Python constant in `contract.py`: it's small, physics-derived, and shared by
+every cycler rather than something a new cycler needs to redeclare.
 
 ## Normalized schema
 
@@ -188,7 +212,9 @@ report, turned into a pass/fail gate with a persisted history.
 
 1. Create `data/cycler_<x>_<name>/`. The cycler name is derived from the
    directory, so nothing else needs to know about it.
-2. Add a `COLUMN_MAP` entry with the source column names and their units.
+2. Add `schema/sources/<name>.yaml` with the source column names and their
+   units (see the existing files for the shape). Picked up automatically by
+   `load_source_schemas()`'s glob — nothing else references the file by name.
 3. Add a normalization test for a representative row.
 
 No parsing or loading code changes, as long as the export is delimited text.

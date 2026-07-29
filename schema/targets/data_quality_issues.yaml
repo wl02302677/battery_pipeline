@@ -1,0 +1,27 @@
+# Append-only audit log of contract/quality gate findings. Deliberately
+# exempt from the drift-rebuild in Database.ensure_schema(): a schema change
+# to tests/timeseries must never silently wipe this table's history.
+table: data_quality_issues
+append_only: true
+columns:
+  - name: id
+    type: serial_pk
+  - name: test_id
+    type: text
+  - name: rule
+    type: text
+    nullable: false
+  - name: severity
+    type: text
+    nullable: false
+  - name: message
+    type: text
+    nullable: false
+  - name: source_path
+    type: text
+  - name: detected_at
+    type: text
+    nullable: false
+indexes:
+  - name: ix_quality_issues_detected_at
+    columns: [detected_at]

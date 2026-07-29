@@ -55,16 +55,23 @@ python -m app.etl.quality_gate --data-root data
 ## How it's put together
 
 ```
+schema/                   declarative data contract: canonical fields, per-cycler
+                           column maps, target table layouts (see Schema below)
+  |
+  v
 data/cycler_*/            raw exports, one file per test
   |
   v
-app/etl/contract.py       per-cycler column map: which column, which unit, per field
+app/schema_loader.py      loads + validates schema/ into Pydantic models (mandatory: a
+                           malformed file raises before any pipeline code runs)
+app/etl/contract.py       applies the loaded column map: which column, which unit, per field
 app/etl/pipeline.py       discover -> hash -> normalize -> validate -> dedupe -> rebase -> load
 app/etl/quality.py        contract + quality checks over the loaded data
 app/etl/quality_gate.py   CI entry point: ingest, check, persist findings, set exit code
   |
   v
-app/db.py                 PostgreSQL or SQLite behind one interface
+app/db.py                 PostgreSQL or SQLite behind one interface; table DDL generated
+                           from schema/targets/*.yaml
   |
   v
 app/api.py                FastAPI read layer + the dashboard route
@@ -76,6 +83,16 @@ a local SQLite file, which is what tests and local runs use — same code path
 either way.
 
 ## Schema
+
+Declared in [schema/](schema/), not as SQL/Python literals: canonical fields
+and per-cycler column maps in `schema/sources/*.yaml` and
+`schema/canonical_fields.yaml`, target table layouts in
+`schema/targets/*.yaml`. [app/schema_loader.py](app/schema_loader.py) loads
+and Pydantic-validates every file once at import time — a malformed file
+raises `SchemaError` before any ingestion runs, and `app/db.py` generates its
+`CREATE TABLE`/`CREATE INDEX` statements from the loaded layout rather than
+hardcoding them. Adding a cycler or a column is editing/adding one YAML file,
+not Python.
 
 `tests` — one row per source file: identity (`test_id`, `cycler`,
 `source_path`, `source_hash`), and per-test counters the API exposes directly

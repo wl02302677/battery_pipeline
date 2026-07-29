@@ -10,6 +10,12 @@ every call site, the differences are isolated here:
 
 All SQL elsewhere in the codebase is written with ``?`` placeholders and is
 translated on the way to the driver.
+
+The target table layouts (``tests``, ``timeseries``, ``data_quality_issues``)
+are declared in ``schema/targets/*.yaml``, not as SQL literals here — see
+``app/schema_loader.py``. This module turns a declared layout into backend-
+appropriate DDL (``_render_create_table``) and derives the column-name tuples
+used for drift detection.
 """
 
 from __future__ import annotations
@@ -24,54 +30,36 @@ from typing import Any
 
 import psycopg2
 
+from app.schema_loader import ColumnSpec, TableSchema, load_target_schema
+
 logger = logging.getLogger(__name__)
 
 # URL prefixes used to tell the two backends apart.
 SQLITE_SCHEME = "sqlite:///"
 POSTGRES_SCHEMES = ("postgresql://", "postgres://")
 
+#: Target table layouts, declared in schema/targets/*.yaml (see
+#: app/schema_loader.py) rather than as SQL literals here. Loaded once at
+#: import time, so a malformed schema file fails before any connection opens.
+_TESTS_SCHEMA: TableSchema = load_target_schema("tests")
+_TIMESERIES_SCHEMA: TableSchema = load_target_schema("timeseries")
+_QUALITY_ISSUES_SCHEMA: TableSchema = load_target_schema("data_quality_issues")
+
 #: Columns of the ``tests`` table, in declaration order. Used to detect schema
 #: drift against a database created by an older version of the pipeline.
-TESTS_COLUMNS: tuple[str, ...] = (
-    "test_id",
-    "cycler",
-    "source_path",
-    "source_hash",
-    "start_offset_s",
-    "rows_loaded",
-    "rows_skipped",
-    "rows_duplicated",
-    "rows_rescaled",
-    "first_timestamp_s",
-    "last_timestamp_s",
-    "cycle_count",
-    "ingested_at",
-)
+TESTS_COLUMNS: tuple[str, ...] = tuple(column.name for column in _TESTS_SCHEMA.columns)
 
 #: Columns of the ``timeseries`` table, in declaration order.
-TIMESERIES_COLUMNS: tuple[str, ...] = (
-    "id",
-    "test_id",
-    "timestamp_s",
-    "voltage_v",
-    "current_a",
-    "temperature_c",
-    "capacity_ah",
-    "cycle_index",
-)
+TIMESERIES_COLUMNS: tuple[str, ...] = tuple(column.name for column in _TIMESERIES_SCHEMA.columns)
 
 #: Columns of the ``data_quality_issues`` table. Not subject to the
 #: drift-rebuild below: it is an append-only audit log, not a reflection of
 #: source file content, so a schema change to `tests`/`timeseries` must never
-#: silently wipe its history.
-QUALITY_ISSUES_COLUMNS: tuple[str, ...] = (
-    "id",
-    "test_id",
-    "rule",
-    "severity",
-    "message",
-    "source_path",
-    "detected_at",
+#: silently wipe its history (``schema/targets/data_quality_issues.yaml``
+#: declares ``append_only: true`` for the same reason; ``ensure_schema``
+#: still only ever rebuilds ``tests``/``timeseries``, see below).
+QUALITY_ISSUES_COLUMNS: tuple[str, ...] = tuple(
+    column.name for column in _QUALITY_ISSUES_SCHEMA.columns
 )
 
 
@@ -240,6 +228,40 @@ class Database:
         """The auto-incrementing primary key syntax for whichever backend this is."""
         return "BIGSERIAL PRIMARY KEY" if self.is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
+    def _sql_type(self, column: ColumnSpec) -> str:
+        """Resolve a declared column type to this backend's SQL type."""
+        return {
+            "text": "TEXT",
+            "int": "INTEGER",
+            "float": self._float_type,
+            "serial_pk": self._serial_pk,
+        }[column.type]
+
+    def _render_create_table(self, schema: TableSchema) -> str:
+        """Build a ``CREATE TABLE IF NOT EXISTS`` statement from a target schema."""
+        columns = []
+        for column in schema.columns:
+            parts = [column.name, self._sql_type(column)]
+            if column.primary_key:
+                parts.append("PRIMARY KEY")
+            if not column.nullable:
+                parts.append("NOT NULL")
+            if column.default is not None:
+                parts.append(f"DEFAULT {column.default}")
+            if column.references:
+                parts.append(f"REFERENCES {column.references}")
+            columns.append(" ".join(parts))
+        body = ",\n    ".join(columns)
+        return f"CREATE TABLE IF NOT EXISTS {schema.table} (\n    {body}\n)"
+
+    def _create_indexes(self, schema: TableSchema) -> None:
+        """Create every index declared for a target schema."""
+        for index in schema.indexes:
+            self.execute(
+                f"CREATE INDEX IF NOT EXISTS {index.name}"
+                f" ON {schema.table} ({', '.join(index.columns)})"
+            )
+
     def table_columns(self, table: str) -> set[str]:
         """Return the column names of ``table``, or an empty set if absent."""
         if self.is_postgres:
@@ -281,67 +303,14 @@ class Database:
             self.commit()
 
         # One row per source file, plus the ingestion counters the API exposes.
-        self.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS tests (
-                test_id TEXT PRIMARY KEY,
-                cycler TEXT NOT NULL,
-                source_path TEXT NOT NULL,
-                source_hash TEXT NOT NULL,
-                start_offset_s {self._float_type},
-                rows_loaded INTEGER NOT NULL DEFAULT 0,
-                rows_skipped INTEGER NOT NULL DEFAULT 0,
-                rows_duplicated INTEGER NOT NULL DEFAULT 0,
-                rows_rescaled INTEGER NOT NULL DEFAULT 0,
-                first_timestamp_s {self._float_type},
-                last_timestamp_s {self._float_type},
-                cycle_count INTEGER NOT NULL DEFAULT 0,
-                ingested_at TEXT
-            )
-            """
-        )
+        self.execute(self._render_create_table(_TESTS_SCHEMA))
         # One row per normalized sample.
-        self.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS timeseries (
-                id {self._serial_pk},
-                test_id TEXT NOT NULL REFERENCES tests(test_id),
-                timestamp_s {self._float_type},
-                voltage_v {self._float_type},
-                current_a {self._float_type},
-                temperature_c {self._float_type},
-                capacity_ah {self._float_type},
-                cycle_index INTEGER
-            )
-            """
-        )
+        self.execute(self._render_create_table(_TIMESERIES_SCHEMA))
         # Every API query filters by test_id; without these indexes each request
         # is a full table scan.
-        self.execute(
-            "CREATE INDEX IF NOT EXISTS ix_timeseries_test_timestamp"
-            " ON timeseries (test_id, timestamp_s)"
-        )
-        self.execute(
-            "CREATE INDEX IF NOT EXISTS ix_timeseries_test_cycle"
-            " ON timeseries (test_id, cycle_index)"
-        )
+        self._create_indexes(_TIMESERIES_SCHEMA)
 
         # Deliberately outside the drift-rebuild above: see QUALITY_ISSUES_COLUMNS.
-        self.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS data_quality_issues (
-                id {self._serial_pk},
-                test_id TEXT,
-                rule TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                message TEXT NOT NULL,
-                source_path TEXT,
-                detected_at TEXT NOT NULL
-            )
-            """
-        )
-        self.execute(
-            "CREATE INDEX IF NOT EXISTS ix_quality_issues_detected_at"
-            " ON data_quality_issues (detected_at)"
-        )
+        self.execute(self._render_create_table(_QUALITY_ISSUES_SCHEMA))
+        self._create_indexes(_QUALITY_ISSUES_SCHEMA)
         self.commit()

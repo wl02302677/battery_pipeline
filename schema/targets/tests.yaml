@@ -1,0 +1,45 @@
+# One row per source file: identity plus the per-test ingestion counters the
+# API exposes directly.
+table: tests
+columns:
+  - name: test_id
+    type: text
+    primary_key: true
+  - name: cycler
+    type: text
+    nullable: false
+  - name: source_path
+    type: text
+    nullable: false
+  - name: source_hash
+    type: text
+    nullable: false
+  - name: start_offset_s
+    type: float
+  - name: rows_loaded
+    type: int
+    nullable: false
+    default: 0
+  - name: rows_skipped
+    type: int
+    nullable: false
+    default: 0
+  - name: rows_duplicated
+    type: int
+    nullable: false
+    default: 0
+  - name: rows_rescaled
+    type: int
+    nullable: false
+    default: 0
+  - name: first_timestamp_s
+    type: float
+  - name: last_timestamp_s
+    type: float
+  - name: cycle_count
+    type: int
+    nullable: false
+    default: 0
+  - name: ingested_at
+    type: text
+indexes: []

@@ -1,0 +1,22 @@
+# Neware BTS4000 export: already in the canonical units (A, Ah, seconds), and
+# does not report temperature at all.
+cycler: neware
+fields:
+  timestamp_s:
+    - column: "Time [s]"
+      unit: s
+  voltage_v:
+    - column: "Voltage [V]"
+      unit: V
+  current_a:
+    - column: "Current [A]"
+      unit: A
+  temperature_c:
+    - column: "Temperature [°C]"
+      unit: C
+  capacity_ah:
+    - column: "Capacity [Ah]"
+      unit: Ah
+  cycle_index:
+    - column: "Cycle"
+      unit: null

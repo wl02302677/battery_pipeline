@@ -5,6 +5,12 @@ therefore declared alongside the column name it belongs to, so a value can never
 be converted with the wrong factor. An earlier version kept a flat list of
 candidate column names and applied a single hardcoded ``mA -> A`` conversion to
 whichever one matched, which silently divided already-in-amps readings by 1000.
+
+The canonical field list and the per-cycler column mapping are declared in
+``schema/canonical_fields.yaml`` and ``schema/sources/*.yaml`` — this module
+loads and applies them (see ``app/schema_loader.py``), it does not declare
+them itself. ``UNIT_CONVERSIONS`` below is the exception: it is small, stable,
+physics-derived, and shared by every cycler, so it stays a Python constant.
 """
 
 from __future__ import annotations
@@ -15,30 +21,30 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from app.schema_loader import load_canonical_schema, load_source_schemas
+
 logger = logging.getLogger(__name__)
 
+#: The normalized schema and per-cycler column mapping are declared in
+#: schema/canonical_fields.yaml and schema/sources/*.yaml, not as literals
+#: here — see app/schema_loader.py. Loaded once at import time, so a
+#: malformed schema file fails before any pipeline code runs.
+_CANONICAL_SCHEMA = load_canonical_schema()
+_SOURCE_SCHEMAS = load_source_schemas()
+
 #: Fields carrying a measurement, in the order they are stored.
-VALUE_FIELDS: tuple[str, ...] = (
-    "timestamp_s",
-    "voltage_v",
-    "current_a",
-    "temperature_c",
-    "capacity_ah",
-    "cycle_index",
-)
+VALUE_FIELDS: tuple[str, ...] = tuple(field.name for field in _CANONICAL_SCHEMA.fields)
 
 #: A row is only stored when all of these are present. Time plus at least one
 #: electrical reading is the minimum needed for any downstream analysis, and
 #: current is required so per-cycle charge/discharge summaries stay meaningful.
-REQUIRED_FIELDS: tuple[str, ...] = ("timestamp_s", "voltage_v", "current_a")
+REQUIRED_FIELDS: tuple[str, ...] = tuple(
+    field.name for field in _CANONICAL_SCHEMA.fields if field.required
+)
 
 #: Canonical unit for each field.
 TARGET_UNITS: dict[str, str] = {
-    "timestamp_s": "s",
-    "voltage_v": "V",
-    "current_a": "A",
-    "temperature_c": "C",
-    "capacity_ah": "Ah",
+    field.name: field.unit for field in _CANONICAL_SCHEMA.fields if field.unit is not None
 }
 
 #: Conversions expressed as (multiplier, divisor) so exact decimal factors stay
@@ -58,42 +64,14 @@ UNIT_CONVERSIONS: dict[tuple[str, str], tuple[float, float]] = {
 #: unit) candidates. The first candidate present in a row wins. ``None`` as a
 #: unit means the value is dimensionless (e.g. a cycle counter).
 #:
-#: Adding a new cycler is a matter of adding an entry here plus a directory named
-#: ``cycler_<x>_<name>``; no parsing code needs to change.
+#: Adding a new cycler is a matter of adding a file to schema/sources/ plus a
+#: directory named ``cycler_<x>_<name>``; no parsing code needs to change.
 COLUMN_MAP: dict[str, dict[str, tuple[tuple[str, str | None], ...]]] = {
-    # BioLogic SP-150 export: tab-separated, reports current in mA and
-    # capacity in mAh, so both need converting to the canonical A / Ah.
-    "biologic": {
-        "timestamp_s": (("time/s", "s"),),
-        "voltage_v": (("voltage_measured", "V"),),
-        "current_a": (("I/mA", "mA"),),
-        "temperature_c": (("Temperature/°C", "C"),),
-        "capacity_ah": (("Capacity/mA.h", "mA.h"), ("Q discharge/mA.h", "mA.h")),
-        "cycle_index": (("cycle number", None),),
-    },
-    # Neware BTS4000 export: already in the canonical units (A, Ah, seconds),
-    # and does not report temperature at all.
-    "neware": {
-        "timestamp_s": (("Time [s]", "s"),),
-        "voltage_v": (("Voltage [V]", "V"),),
-        "current_a": (("Current [A]", "A"),),
-        "temperature_c": (("Temperature [°C]", "C"),),
-        "capacity_ah": (("Capacity [Ah]", "Ah"),),
-        "cycle_index": (("Cycle", None),),
-    },
-    # Novonix UHPC export: the only one of the three that reports time in
-    # hours rather than seconds.
-    "novonix": {
-        # "Run Time (h)" is the test clock. "Step Time (h)" restarts on every
-        # step, so it is deliberately not used as a fallback: mixing the two
-        # would put two different time bases in one column.
-        "timestamp_s": (("Run Time (h)", "h"),),
-        "voltage_v": (("cell_voltage", "V"), ("Voltage (V)", "V")),
-        "current_a": (("Current (A)", "A"),),
-        "temperature_c": (("Temperature (°C)", "C"),),
-        "capacity_ah": (("Capacity (Ah)", "Ah"),),
-        "cycle_index": (("Cycle Number", None),),
-    },
+    cycler: {
+        field: tuple((candidate.column, candidate.unit) for candidate in candidates)
+        for field, candidates in schema.fields.items()
+    }
+    for cycler, schema in _SOURCE_SCHEMAS.items()
 }
 
 #: Single-cell chemistries stay well under this. A reading above it means the
