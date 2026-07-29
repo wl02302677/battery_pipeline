@@ -1,0 +1,27 @@
+# Novonix UHPC export: the only one of the three that reports time in hours
+# rather than seconds.
+cycler: novonix
+fields:
+  timestamp_s:
+    # "Run Time (h)" is the test clock. "Step Time (h)" restarts on every
+    # step, so it is deliberately not declared as a fallback here: mixing the
+    # two would put two different time bases in one column.
+    - column: "Run Time (h)"
+      unit: h
+  voltage_v:
+    - column: "cell_voltage"
+      unit: V
+    - column: "Voltage (V)"
+      unit: V
+  current_a:
+    - column: "Current (A)"
+      unit: A
+  temperature_c:
+    - column: "Temperature (°C)"
+      unit: C
+  capacity_ah:
+    - column: "Capacity (Ah)"
+      unit: Ah
+  cycle_index:
+    - column: "Cycle Number"
+      unit: null

@@ -1,0 +1,25 @@
+# The normalized schema every cycler is mapped onto (app/etl/contract.py).
+# Order here is the storage order (VALUE_FIELDS); `required: true` fields are
+# the ones a row must have to be stored at all (REQUIRED_FIELDS) — time plus
+# at least one electrical reading, with current required so per-cycle
+# charge/discharge summaries stay meaningful. `unit: null` means the field is
+# dimensionless (a counter, not a measurement).
+fields:
+  - name: timestamp_s
+    unit: s
+    required: true
+  - name: voltage_v
+    unit: V
+    required: true
+  - name: current_a
+    unit: A
+    required: true
+  - name: temperature_c
+    unit: C
+    required: false
+  - name: capacity_ah
+    unit: Ah
+    required: false
+  - name: cycle_index
+    unit: null
+    required: false

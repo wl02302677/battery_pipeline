@@ -1,0 +1,24 @@
+# BioLogic SP-150 export: tab-separated, reports current in mA and capacity
+# in mAh, so both need converting to the canonical A / Ah.
+cycler: biologic
+fields:
+  timestamp_s:
+    - column: "time/s"
+      unit: s
+  voltage_v:
+    - column: "voltage_measured"
+      unit: V
+  current_a:
+    - column: "I/mA"
+      unit: mA
+  temperature_c:
+    - column: "Temperature/°C"
+      unit: C
+  capacity_ah:
+    - column: "Capacity/mA.h"
+      unit: mA.h
+    - column: "Q discharge/mA.h"
+      unit: mA.h
+  cycle_index:
+    - column: "cycle number"
+      unit: null

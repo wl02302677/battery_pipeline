@@ -1,0 +1,27 @@
+# One row per normalized sample. Indexed on (test_id, timestamp_s) and
+# (test_id, cycle_index) since every API query filters by test_id.
+table: timeseries
+columns:
+  - name: id
+    type: serial_pk
+  - name: test_id
+    type: str
+    nullable: false
+    references: "tests(test_id)"
+  - name: timestamp_s
+    type: float
+  - name: voltage_v
+    type: float
+  - name: current_a
+    type: float
+  - name: temperature_c
+    type: float
+  - name: capacity_ah
+    type: float
+  - name: cycle_index
+    type: int
+indexes:
+  - name: ix_timeseries_test_timestamp
+    columns: [test_id, timestamp_s]
+  - name: ix_timeseries_test_cycle
+    columns: [test_id, cycle_index]

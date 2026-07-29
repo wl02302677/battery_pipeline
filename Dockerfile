@@ -10,9 +10,10 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Only the application: the raw data is bind-mounted and the SQLite artifacts are
-# not needed in the image.
+# Only the application plus the data contract it loads at import time: the raw
+# data is bind-mounted and the SQLite artifacts are not needed in the image.
 COPY app ./app
+COPY schema ./schema
 
 # Neither the ETL nor the API needs to write to the filesystem.
 RUN useradd --create-home --uid 1000 battery
