@@ -7,20 +7,20 @@ columns:
   - name: id
     type: serial_pk
   - name: test_id
-    type: text
+    type: str
   - name: rule
-    type: text
+    type: str
     nullable: false
   - name: severity
-    type: text
+    type: str
     nullable: false
   - name: message
-    type: text
+    type: str
     nullable: false
   - name: source_path
-    type: text
+    type: str
   - name: detected_at
-    type: text
+    type: str
     nullable: false
 indexes:
   - name: ix_quality_issues_detected_at

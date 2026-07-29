@@ -3,16 +3,16 @@
 table: tests
 columns:
   - name: test_id
-    type: text
+    type: str
     primary_key: true
   - name: cycler
-    type: text
+    type: str
     nullable: false
   - name: source_path
-    type: text
+    type: str
     nullable: false
   - name: source_hash
-    type: text
+    type: str
     nullable: false
   - name: start_offset_s
     type: float
@@ -41,5 +41,5 @@ columns:
     nullable: false
     default: 0
   - name: ingested_at
-    type: text
+    type: str
 indexes: []

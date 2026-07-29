@@ -5,7 +5,7 @@ columns:
   - name: id
     type: serial_pk
   - name: test_id
-    type: text
+    type: str
     nullable: false
     references: "tests(test_id)"
   - name: timestamp_s

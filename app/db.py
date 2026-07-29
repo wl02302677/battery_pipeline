@@ -229,9 +229,9 @@ class Database:
         return "BIGSERIAL PRIMARY KEY" if self.is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
 
     def _sql_type(self, column: ColumnSpec) -> str:
-        """Resolve a declared column type to this backend's SQL type."""
+        """Resolve a declared Python-level column type to this backend's SQL type."""
         return {
-            "text": "TEXT",
+            "str": "TEXT",
             "int": "INTEGER",
             "float": self._float_type,
             "serial_pk": self._serial_pk,

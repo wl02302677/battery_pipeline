@@ -71,10 +71,12 @@ class CanonicalSchema(BaseModel):
 
 # -- target schemas (database table layout) -------------------------------- #
 
-#: ``serial_pk`` is resolved to whichever backend's auto-increment primary key
-#: syntax applies (see `Database._serial_pk`); the other three map to a fixed
-#: SQL type regardless of backend.
-ColumnType = Literal["text", "int", "float", "serial_pk"]
+#: Declared using Python type names, not SQL ones: a column holds a ``str``,
+#: an ``int``, or a ``float`` at the Python level, and ``app.db`` is the only
+#: place that translates that into a backend-specific SQL type. ``serial_pk``
+#: is the one exception — an auto-incrementing primary key has no Python-value
+#: equivalent, so it stays a database-only concept (see `Database._serial_pk`).
+ColumnType = Literal["str", "int", "float", "serial_pk"]
 
 
 class ColumnSpec(BaseModel):
