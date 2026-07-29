@@ -33,6 +33,8 @@ MAX_PAGE_SIZE = 50_000
 #: dependencies, so it needs nothing beyond what `docker compose up` already runs.
 DASHBOARD_PATH = Path(__file__).parent / "static" / "dashboard.html"
 
+# The FastAPI application. `--reload`/uvicorn import this object by name
+# ("app.api:app") to start the server.
 app = FastAPI(
     title="Battery ETL API",
     version="1.0.0",
@@ -55,12 +57,16 @@ def dashboard() -> FileResponse:
 
 
 class Health(BaseModel):
+    """Response shape for GET /health."""
+
     status: str
     backend: str
     tests: int
 
 
 class TestSummary(BaseModel):
+    """One row of GET /tests, or the body of GET /tests/{test_id}."""
+
     test_id: str
     cycler: str
     source_path: str
@@ -78,6 +84,8 @@ class TestSummary(BaseModel):
 
 
 class TimeseriesPoint(BaseModel):
+    """One sample inside a GET /tests/{test_id}/timeseries page."""
+
     timestamp_s: float | None
     voltage_v: float | None
     current_a: float | None
@@ -87,6 +95,10 @@ class TimeseriesPoint(BaseModel):
 
 
 class TimeseriesPage(BaseModel):
+    """Response shape for GET /tests/{test_id}/timeseries: one page of samples
+    plus enough metadata for the client to fetch the next page.
+    """
+
     test_id: str
     total: int = Field(description="Rows matching the filters, ignoring pagination")
     returned: int
@@ -99,6 +111,8 @@ class TimeseriesPage(BaseModel):
 
 
 class CycleSummary(BaseModel):
+    """One row of GET /tests/{test_id}/cycles: stats for a single cycle."""
+
     cycle_index: int
     sample_count: int
     start_time_s: float | None
@@ -136,18 +150,24 @@ def database() -> Iterator[Database]:
     try:
         db = Database.connect(db_path=os.getenv("BATTERY_DB_PATH"), retries=1, delay_seconds=0)
     except DATABASE_ERRORS as exc:
+        # Could not even open a connection — the database is down or not
+        # reachable yet. Report this as a 503, not a 500.
         logger.warning("Database unavailable: %s", exc)
         raise HTTPException(status_code=503, detail="database unavailable") from exc
 
     try:
         yield db
     except DATABASE_ERRORS as exc:
+        # A query failed after the connection was already open — still a
+        # "the database isn't working right now" situation from the caller's
+        # point of view, so it gets the same 503 treatment.
         logger.warning("Database query failed: %s", exc)
         raise HTTPException(status_code=503, detail="database unavailable") from exc
     finally:
         db.close()
 
 
+# Shared column list for the two endpoints that return a TestSummary.
 TEST_COLUMNS_SQL = """
     test_id, cycler, source_path, rows_loaded, rows_skipped, rows_duplicated,
     rows_rescaled, start_offset_s, last_timestamp_s, cycle_count, ingested_at
@@ -155,6 +175,7 @@ TEST_COLUMNS_SQL = """
 
 
 def _test_summary(row: tuple) -> TestSummary:
+    """Turn one raw `tests` row (in TEST_COLUMNS_SQL order) into a TestSummary."""
     (
         test_id,
         cycler,
@@ -213,6 +234,8 @@ def list_tests(
     cycler: str | None = Query(default=None, description="Filter by cycler name"),
 ) -> list[TestSummary]:
     """List every ingested test with its ingestion and data quality counters."""
+    # Build the query: filter by cycler only when one was requested, then
+    # always return results sorted by test_id for a stable ordering.
     statement = f"SELECT {TEST_COLUMNS_SQL} FROM tests"
     params: list[object] = []
     if cycler:
@@ -249,6 +272,7 @@ def get_timeseries(
     A single test can hold far more rows than a client wants at once, so results
     are always paginated and can be narrowed by time window or cycle.
     """
+    # Build up the WHERE clause from whichever optional filters were passed.
     filters = ["test_id = ?"]
     params: list[object] = [test_id]
     if start_s is not None:
@@ -265,6 +289,7 @@ def get_timeseries(
     with database() as db:
         _require_test(db, test_id)
 
+        # Total count (for the response envelope), then the actual page of rows.
         total_row = db.query_one(f"SELECT COUNT(*) FROM timeseries WHERE {where_clause}", params)
         total = total_row[0] if total_row else 0
 
@@ -290,6 +315,7 @@ def get_timeseries(
         )
         for timestamp_s, voltage_v, current_a, temperature_c, capacity_ah, cycle_index_value in rows
     ]
+    # There's a next page only if this page didn't reach the total row count.
     next_offset = offset + len(data) if offset + len(data) < total else None
 
     return TimeseriesPage(
@@ -312,6 +338,8 @@ def get_cycles(test_id: str) -> list[CycleSummary]:
     """
     with database() as db:
         _require_test(db, test_id)
+        # One row per cycle_index, with min/max/aggregate stats computed by
+        # the database rather than in Python.
         rows = db.query(
             """
             SELECT

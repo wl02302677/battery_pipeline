@@ -32,6 +32,7 @@ def _annotate(issue: Issue) -> None:
     not just buried in the raw log. Harmless outside of GitHub Actions — an
     unrecognized `::...::` line is simply printed as-is.
     """
+    # "critical" becomes a red error annotation, everything else a yellow warning.
     level = "error" if issue.severity == "critical" else "warning"
     location = issue.source_path or issue.test_id or ""
     print(f"::{level} file={location}::{issue.rule}: {issue.message}")
@@ -43,8 +44,11 @@ def run(
     db_path: str | None = None,
 ) -> list[Issue]:
     """Ingest `data_root`, check the result, and persist every issue found."""
+    # Step 1: run the normal ETL pipeline.
     summary = ingest_directory(data_root, db_path=db_path, database_url=database_url)
 
+    # Step 2: check the result, both structurally (the contract) and
+    # statistically (the loaded values), then save whatever was found.
     with Database.connect(database_url=database_url, db_path=db_path) as db:
         issues = check_contract(summary) + check_quality(db)
         save_issues(db, issues)
@@ -53,6 +57,7 @@ def run(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Command-line entry point: ``python -m app.etl.quality_gate``."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--data-root",
@@ -79,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Data quality gate: no issues found.")
         return 0
 
+    # Print an annotation and a log line for every issue found, so it shows up
+    # both on the PR diff (annotation) and in the raw CI log (log line).
     for issue in issues:
         _annotate(issue)
         logger.log(
@@ -88,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
             issue.message,
         )
 
+    # Only a critical finding fails the build; warnings are surfaced but don't
+    # block anything.
     critical = [issue for issue in issues if issue.severity == "critical"]
     print(f"Data quality gate: {len(issues)} issue(s) found ({len(critical)} critical).")
     return 1 if critical else 0

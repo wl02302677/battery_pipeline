@@ -1,6 +1,21 @@
+<!--
+  Battery Pipeline Dashboard.
+
+  A single, self-contained HTML file: plain CSS and vanilla JavaScript, no
+  build step, no external libraries. It is served directly by the FastAPI app
+  at GET / (see app/api.py's `dashboard()` route).
+
+  Layout of this file:
+    1. <style>  - CSS custom properties for light/dark theming, then component styles
+    2. HTML     - header, test picker, KPI tiles, three charts, cycle table
+    3. <script> - fetches data from the JSON API and draws everything on <canvas>
+-->
 <title>Battery Pipeline Dashboard</title>
 <div class="viz-root">
   <style>
+    /* Color variables for light mode (the default). Dark mode overrides these
+       same variable names further down, so the rest of the CSS never needs
+       to know which theme is active. */
     .viz-root {
       color-scheme: light;
       --surface-1: #fcfcfb;
@@ -26,6 +41,8 @@
       box-sizing: border-box;
       padding: 24px clamp(16px, 4vw, 48px) 48px;
     }
+    /* Dark mode via the OS/browser setting, unless the visitor has explicitly
+       picked a theme with the toggle button (data-theme overrides this). */
     @media (prefers-color-scheme: dark) {
       :root:where(:not([data-theme="light"])) .viz-root {
         color-scheme: dark;
@@ -42,6 +59,8 @@
         --series-temperature: #199e70;
       }
     }
+    /* Dark mode via the manual toggle button (sets data-theme="dark" on
+       <html>), which always wins over the OS setting above. */
     :root[data-theme="dark"] .viz-root {
       color-scheme: dark;
       --surface-1: #1a1a19;
@@ -307,9 +326,12 @@
 </div>
 
 <script>
+  // Everything below runs inside one IIFE so its variables don't leak onto
+  // the page's global `window` object.
   (() => {
     "use strict";
 
+    // Grab references to every element this script will read from or write to.
     const vizRoot = document.querySelector(".viz-root");
     const contentEl = document.getElementById("content");
     const errorBanner = document.getElementById("error-banner");
@@ -321,14 +343,19 @@
     const tooltipEl = document.getElementById("tooltip");
 
     // -- theme -------------------------------------------------------- //
+    // Lets the visitor override the OS light/dark setting, and remembers
+    // their choice in localStorage so it persists across page reloads.
 
     const THEME_KEY = "battery-dashboard-theme";
 
+    // Called once on page load: if the visitor picked a theme before,
+    // re-apply it immediately (before anything else renders).
     function applyStoredTheme() {
       const saved = localStorage.getItem(THEME_KEY);
       if (saved) document.documentElement.setAttribute("data-theme", saved);
     }
 
+    // Clicking the button flips between light and dark and saves the choice.
     themeToggle.addEventListener("click", () => {
       const current =
         document.documentElement.getAttribute("data-theme") ||
@@ -336,27 +363,35 @@
       const next = current === "dark" ? "light" : "dark";
       document.documentElement.setAttribute("data-theme", next);
       localStorage.setItem(THEME_KEY, next);
+      // Charts are drawn on <canvas>, so their colors are baked into pixels —
+      // switching CSS variables alone doesn't repaint them. Force a redraw.
       charts.forEach((chart) => chart.render());
     });
 
     applyStoredTheme();
 
+    // Reads the *current* value of a CSS custom property (e.g. "--series-voltage"),
+    // so chart colors automatically follow whichever theme is active right now.
     function cssVar(name) {
       return getComputedStyle(vizRoot).getPropertyValue(name).trim();
     }
 
     // -- number formatting ---------------------------------------------- //
+    // Small helpers used by the KPI tiles, the cycle table, and chart labels.
 
+    // "3.7000" style formatting with a fixed number of decimal places.
     function formatNumber(value, digits = 3) {
       if (value === null || value === undefined) return "–";
       return Number(value).toFixed(digits);
     }
 
+    // "3.20 – 3.76" style formatting for a min/max pair (used in the cycle table).
     function formatRange(min, max, digits = 3) {
       if (min === null || min === undefined || max === null || max === undefined) return "–";
       return `${formatNumber(min, digits)} – ${formatNumber(max, digits)}`;
     }
 
+    // "12.9k" style formatting for large counts (rows loaded, etc.).
     function formatCompact(value) {
       if (value === null || value === undefined) return "–";
       const abs = Math.abs(value);
@@ -365,6 +400,8 @@
     }
 
     // -- nice ticks ------------------------------------------------------ //
+    // Picks "round" axis tick values (0, 0.5, 1, 1.5, ...) instead of raw
+    // fractions of the data range, the same way most charting libraries do.
 
     function niceTicks(min, max, count) {
       if (min === max) {
@@ -397,12 +434,19 @@
       return value.toFixed(decimals);
     }
 
+    // Formats a time-axis label as seconds, minutes, or hours, whichever reads
+    // best for the size of the number (e.g. "12287s" would be hard to scan;
+    // "3.4h" isn't).
     function formatTimeTick(seconds) {
       if (Math.abs(seconds) >= 3600) return `${(seconds / 3600).toFixed(1)}h`;
       if (Math.abs(seconds) >= 60) return `${(seconds / 60).toFixed(1)}m`;
       return `${Math.round(seconds)}s`;
     }
 
+    // Binary search for the data point whose x is closest to a given value.
+    // Used to find "the sample under the mouse cursor" when hovering a chart —
+    // points are sorted by time, so this is much faster than scanning every
+    // point on every mouse movement.
     function bisectNearest(points, x) {
       let lo = 0;
       let hi = points.length - 1;
@@ -411,23 +455,31 @@
         if (points[mid].x < x) lo = mid + 1;
         else hi = mid;
       }
+      // lo now points at the first sample >= x; check whether the sample just
+      // before it is actually closer.
       if (lo > 0 && Math.abs(points[lo - 1].x - x) < Math.abs(points[lo].x - x)) return lo - 1;
       return lo;
     }
 
     // -- line chart -------------------------------------------------- //
+    // A small hand-rolled line chart, drawn on <canvas>. One instance per
+    // chart (voltage/current/temperature); each only ever plots one series.
 
     class LineChart {
+      // `canvas` is the <canvas> element to draw on; `color`/`unit`/`digits`
+      // describe the one series this chart shows (e.g. blue, "V", 3 decimals).
       constructor(canvas, { color, unit, digits }) {
         this.canvas = canvas;
         this.ctx = canvas.getContext("2d");
         this.color = color;
         this.unit = unit;
         this.digits = digits;
-        this.points = [];
+        this.points = []; // [{x: time in seconds, y: the measurement}, ...]
         this.padding = { top: 10, right: 16, bottom: 24, left: 54 };
         this._onResize = () => this.resize();
         window.addEventListener("resize", this._onResize);
+        // Redraw with a crosshair when the mouse moves over the chart, and
+        // remove it when the mouse leaves.
         canvas.addEventListener("pointermove", (e) => this._onPointerMove(e));
         canvas.addEventListener("pointerleave", () => {
           this._hover = null;
@@ -436,12 +488,17 @@
         });
       }
 
+      // Replace this chart's data (called whenever a different test is
+      // selected) and redraw.
       setData(points) {
         this.points = points;
         this._hover = null;
         this.resize();
       }
 
+      // Matches the canvas's pixel buffer to its on-screen size, accounting
+      // for high-DPI ("retina") screens, then redraws. Called on load, on
+      // window resize, and whenever new data arrives.
       resize() {
         const dpr = window.devicePixelRatio || 1;
         const rect = this.canvas.getBoundingClientRect();
@@ -453,6 +510,8 @@
         this.render();
       }
 
+      // Works out the pixel <-> data-value conversion for the current data
+      // and canvas size: where on screen does a given (time, value) land?
       _scales() {
         const { padding, points, cssWidth, cssHeight } = this;
         const xs = points.map((p) => p.x);
@@ -468,12 +527,16 @@
         return { xMin, xMax, yRange, xScale, yScale, plotW, plotH, padding };
       }
 
+      // Draws the whole chart from scratch: gridlines, axis labels, the line
+      // itself, the endpoint marker/label, and (if hovering) the crosshair.
+      // Called after every data change, resize, and theme change.
       render() {
         const ctx = this.ctx;
         if (!this.cssWidth) return;
         ctx.clearRect(0, 0, this.cssWidth, this.cssHeight);
 
         if (!this.points.length) {
+          // e.g. temperature for a Neware test, which reports none at all.
           ctx.fillStyle = cssVar("--text-muted");
           ctx.font = "13px system-ui, sans-serif";
           ctx.textAlign = "left";
@@ -486,6 +549,7 @@
         this._scalesCache = scales;
         const { yRange, xScale, yScale, padding, plotW, plotH } = scales;
 
+        // Horizontal gridlines with a value label on the left of each.
         ctx.strokeStyle = cssVar("--gridline");
         ctx.fillStyle = cssVar("--text-muted");
         ctx.font = "10px system-ui, sans-serif";
@@ -502,6 +566,7 @@
           ctx.fillText(formatTickValue(t, yRange.step), padding.left - 8, y);
         });
 
+        // The x-axis baseline (a plain horizontal line along the bottom).
         ctx.strokeStyle = cssVar("--baseline");
         ctx.beginPath();
         ctx.moveTo(padding.left, padding.top + plotH + 0.5);
@@ -519,6 +584,7 @@
         ctx.textAlign = "right";
         ctx.fillText(formatTimeTick(scales.xMax), padding.left + plotW, padding.top + plotH + 6);
 
+        // The data itself: one continuous line connecting every point in order.
         ctx.strokeStyle = this.color;
         ctx.lineWidth = 2;
         ctx.lineJoin = "round";
@@ -532,6 +598,8 @@
         });
         ctx.stroke();
 
+        // Mark and label the last (most recent) point, so the chart shows a
+        // concrete value even without hovering.
         const last = this.points[this.points.length - 1];
         this._drawMarker(xScale(last.x), yScale(last.y));
 
@@ -556,6 +624,8 @@
         if (this._hover) this._drawCrosshair(this._hover, scales);
       }
 
+      // A filled dot with a small ring of surface color around it, so it
+      // stays visible even where it overlaps the line itself.
       _drawMarker(x, y) {
         const ctx = this.ctx;
         ctx.fillStyle = cssVar("--surface-1");
@@ -568,6 +638,9 @@
         ctx.fill();
       }
 
+      // Vertical line plus a marker at the hovered data point — this is what
+      // makes hovering the chart show "you are here" instead of just a tooltip
+      // floating with no visible connection to the line.
       _drawCrosshair(point, scales) {
         const ctx = this.ctx;
         const { xScale, yScale, padding, plotH } = scales;
@@ -581,10 +654,15 @@
         this._drawMarker(x, y);
       }
 
+      // Runs on every mouse move over the canvas: figure out which data point
+      // the mouse is closest to, redraw with the crosshair there, and
+      // position the floating tooltip next to the cursor.
       _onPointerMove(e) {
         if (!this.points.length || !this._scalesCache) return;
         const rect = this.canvas.getBoundingClientRect();
         const { xScale, xMin, xMax, padding, plotW } = this._scalesCache;
+        // Convert the mouse's pixel position back into a time value, then
+        // find the nearest actual sample to that time.
         const mouseX = e.clientX - rect.left;
         const t = xMin + ((mouseX - padding.left) / plotW) * (xMax - xMin);
         const idx = bisectNearest(this.points, t);
@@ -594,6 +672,7 @@
         this._hover = point;
         this.render();
 
+        // Position the tooltip just above the hovered point and fill in its text.
         const x = xScale(point.x);
         tooltipEl.style.left = `${rect.left + x}px`;
         tooltipEl.style.top = `${e.clientY}px`;
@@ -609,6 +688,10 @@
       }
     }
 
+    // One chart per measurement. Deliberately three separate single-axis
+    // charts rather than one chart with multiple axes — voltage and current
+    // are unrelated scales, and combining them on one chart would visually
+    // imply a relationship between them that isn't real.
     const charts = [
       new LineChart(document.getElementById("chart-voltage"), {
         color: cssVar("--series-voltage") || "#2a78d6",
@@ -629,6 +712,9 @@
     const [voltageChart, currentChart, temperatureChart] = charts;
 
     // -- data loading -------------------------------------------------- //
+    // Everything below fetches data from the JSON API (app/api.py) and turns
+    // it into what's on screen: the error banner, the KPI tiles, the charts,
+    // and the cycle table.
 
     function showError(message) {
       errorBanner.textContent = message;
@@ -640,6 +726,9 @@
       errorBanner.textContent = "";
     }
 
+    // fetch() wrapper that turns a non-2xx response into a thrown error with
+    // a readable message, instead of silently returning error JSON as if it
+    // were normal data.
     async function fetchJson(url) {
       const response = await fetch(url);
       if (!response.ok) {
@@ -655,6 +744,8 @@
       return response.json();
     }
 
+    // The /timeseries endpoint is paginated, so fetch pages one after another
+    // until there are no more, and return every sample as one flat array.
     async function fetchAllTimeseries(testId) {
       const points = [];
       let offset = 0;
@@ -668,6 +759,8 @@
       return points;
     }
 
+    // Fills the KPI row (rows loaded/skipped/duplicated/rescaled, cycle
+    // count, duration) with values from one test's summary.
     function renderKpis(test) {
       const tiles = [
         ["Cycler", test.cycler],
@@ -693,6 +786,8 @@
       }
     }
 
+    // Rebuilds the cycle summary table from the /cycles endpoint's response,
+    // one row per cycle.
     function renderCycles(cycles) {
       cyclesTbody.innerHTML = "";
       for (const cycle of cycles) {
@@ -717,12 +812,17 @@
       }
     }
 
+    // Loads everything for one test — summary, full time series, cycle
+    // stats — and updates the whole page. Runs once at startup for the first
+    // test, and again every time a different test is picked from the dropdown.
     async function loadTest(testId) {
       contentEl.classList.add("loading");
       clearError();
       rawLink.href = `/tests/${encodeURIComponent(testId)}/timeseries?limit=5000`;
 
       try {
+        // Fetch the summary, the full time series, and the cycle stats at
+        // the same time rather than one after another.
         const [test, points, cycles] = await Promise.all([
           fetchJson(`/tests/${encodeURIComponent(testId)}`),
           fetchAllTimeseries(testId),
@@ -734,6 +834,8 @@
 
         voltageChart.setData(points.map((p) => ({ x: p.timestamp_s, y: p.voltage_v })));
         currentChart.setData(points.map((p) => ({ x: p.timestamp_s, y: p.current_a })));
+        // Temperature can be null per-row (or entirely absent for a cycler
+        // like Neware); only chart the samples that actually have a value.
         temperatureChart.setData(
           points.filter((p) => p.temperature_c !== null).map((p) => ({ x: p.timestamp_s, y: p.temperature_c })),
         );
@@ -744,6 +846,8 @@
       }
     }
 
+    // Entry point: runs once when the page loads. Populates the test
+    // dropdown (grouped by cycler) and loads the first test.
     async function init() {
       try {
         const tests = await fetchJson("/tests");
@@ -752,6 +856,8 @@
           return;
         }
 
+        // Group tests by cycler so the dropdown can show them under a
+        // labeled <optgroup> per cycler.
         const byCycler = new Map();
         for (const test of tests) {
           if (!byCycler.has(test.cycler)) byCycler.set(test.cycler, []);

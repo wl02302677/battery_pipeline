@@ -44,6 +44,7 @@ def postgres_summary():
 
 @pytest.fixture
 def client(postgres_summary, monkeypatch):
+    """A FastAPI test client pointed at the PostgreSQL database above."""
     monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
     return TestClient(app)
 
@@ -55,19 +56,19 @@ def test_schema_is_created_with_postgres_types(postgres_summary):
         assert db.table_columns("timeseries") == set(TIMESERIES_COLUMNS)
 
 
-def test_ingestion_loads_every_test(postgres_summary):
-    assert postgres_summary["tests_loaded"] == 12
+def test_ingestion_loads_every_test(postgres_summary, repo_test_count):
+    assert postgres_summary["tests_loaded"] == repo_test_count
     assert postgres_summary["rows_loaded"] > 10_000
 
 
-def test_reingesting_into_postgres_is_idempotent(postgres_summary):
+def test_reingesting_into_postgres_is_idempotent(postgres_summary, repo_test_count):
     """`docker compose up` re-runs the ETL against a persisted volume; a
     second run over unchanged files should do no reparsing or reloading."""
     ingest_directory(REPO_DATA, database_url=DATABASE_URL)
     second = ingest_directory(REPO_DATA, database_url=DATABASE_URL)
 
     assert second["tests_loaded"] == 0
-    assert second["files_unchanged"] == 12
+    assert second["files_unchanged"] == repo_test_count
 
     with Database.connect(database_url=DATABASE_URL) as db:
         total = db.query_one("SELECT COUNT(*) FROM timeseries")[0]
@@ -85,11 +86,15 @@ def test_units_survive_the_postgres_round_trip(postgres_summary):
     assert 1e-3 <= peak_current <= 1.0
 
 
-def test_api_endpoints_work_against_postgres(client):
-    assert client.get("/health").json() == {"status": "ok", "backend": "postgresql", "tests": 12}
+def test_api_endpoints_work_against_postgres(client, repo_test_count):
+    assert client.get("/health").json() == {
+        "status": "ok",
+        "backend": "postgresql",
+        "tests": repo_test_count,
+    }
 
     tests_payload = client.get("/tests").json()
-    assert len(tests_payload) == 12
+    assert len(tests_payload) == repo_test_count
 
     page = client.get("/tests/novonix_cell_001/timeseries", params={"limit": 10}).json()
     assert page["returned"] == 10

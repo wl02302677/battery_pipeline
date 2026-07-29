@@ -5,6 +5,12 @@ therefore declared alongside the column name it belongs to, so a value can never
 be converted with the wrong factor. An earlier version kept a flat list of
 candidate column names and applied a single hardcoded ``mA -> A`` conversion to
 whichever one matched, which silently divided already-in-amps readings by 1000.
+
+The canonical field list and the per-cycler column mapping are declared in
+``schema/canonical_fields.yaml`` and ``schema/sources/*.yaml`` — this module
+loads and applies them (see ``app/schema_loader.py``), it does not declare
+them itself. ``UNIT_CONVERSIONS`` below is the exception: it is small, stable,
+physics-derived, and shared by every cycler, so it stays a Python constant.
 """
 
 from __future__ import annotations
@@ -15,30 +21,30 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from app.schema_loader import load_canonical_schema, load_source_schemas
+
 logger = logging.getLogger(__name__)
 
+#: The normalized schema and per-cycler column mapping are declared in
+#: schema/canonical_fields.yaml and schema/sources/*.yaml, not as literals
+#: here — see app/schema_loader.py. Loaded once at import time, so a
+#: malformed schema file fails before any pipeline code runs.
+_CANONICAL_SCHEMA = load_canonical_schema()
+_SOURCE_SCHEMAS = load_source_schemas()
+
 #: Fields carrying a measurement, in the order they are stored.
-VALUE_FIELDS: tuple[str, ...] = (
-    "timestamp_s",
-    "voltage_v",
-    "current_a",
-    "temperature_c",
-    "capacity_ah",
-    "cycle_index",
-)
+VALUE_FIELDS: tuple[str, ...] = tuple(field.name for field in _CANONICAL_SCHEMA.fields)
 
 #: A row is only stored when all of these are present. Time plus at least one
 #: electrical reading is the minimum needed for any downstream analysis, and
 #: current is required so per-cycle charge/discharge summaries stay meaningful.
-REQUIRED_FIELDS: tuple[str, ...] = ("timestamp_s", "voltage_v", "current_a")
+REQUIRED_FIELDS: tuple[str, ...] = tuple(
+    field.name for field in _CANONICAL_SCHEMA.fields if field.required
+)
 
 #: Canonical unit for each field.
 TARGET_UNITS: dict[str, str] = {
-    "timestamp_s": "s",
-    "voltage_v": "V",
-    "current_a": "A",
-    "temperature_c": "C",
-    "capacity_ah": "Ah",
+    field.name: field.unit for field in _CANONICAL_SCHEMA.fields if field.unit is not None
 }
 
 #: Conversions expressed as (multiplier, divisor) so exact decimal factors stay
@@ -58,36 +64,14 @@ UNIT_CONVERSIONS: dict[tuple[str, str], tuple[float, float]] = {
 #: unit) candidates. The first candidate present in a row wins. ``None`` as a
 #: unit means the value is dimensionless (e.g. a cycle counter).
 #:
-#: Adding a new cycler is a matter of adding an entry here plus a directory named
-#: ``cycler_<x>_<name>``; no parsing code needs to change.
+#: Adding a new cycler is a matter of adding a file to schema/sources/ plus a
+#: directory named ``cycler_<x>_<name>``; no parsing code needs to change.
 COLUMN_MAP: dict[str, dict[str, tuple[tuple[str, str | None], ...]]] = {
-    "biologic": {
-        "timestamp_s": (("time/s", "s"),),
-        "voltage_v": (("voltage_measured", "V"),),
-        "current_a": (("I/mA", "mA"),),
-        "temperature_c": (("Temperature/°C", "C"),),
-        "capacity_ah": (("Capacity/mA.h", "mA.h"), ("Q discharge/mA.h", "mA.h")),
-        "cycle_index": (("cycle number", None),),
-    },
-    "neware": {
-        "timestamp_s": (("Time [s]", "s"),),
-        "voltage_v": (("Voltage [V]", "V"),),
-        "current_a": (("Current [A]", "A"),),
-        "temperature_c": (("Temperature [°C]", "C"),),
-        "capacity_ah": (("Capacity [Ah]", "Ah"),),
-        "cycle_index": (("Cycle", None),),
-    },
-    "novonix": {
-        # "Run Time (h)" is the test clock. "Step Time (h)" restarts on every
-        # step, so it is deliberately not used as a fallback: mixing the two
-        # would put two different time bases in one column.
-        "timestamp_s": (("Run Time (h)", "h"),),
-        "voltage_v": (("cell_voltage", "V"), ("Voltage (V)", "V")),
-        "current_a": (("Current (A)", "A"),),
-        "temperature_c": (("Temperature (°C)", "C"),),
-        "capacity_ah": (("Capacity (Ah)", "Ah"),),
-        "cycle_index": (("Cycle Number", None),),
-    },
+    cycler: {
+        field: tuple((candidate.column, candidate.unit) for candidate in candidates)
+        for field, candidates in schema.fields.items()
+    }
+    for cycler, schema in _SOURCE_SCHEMAS.items()
 }
 
 #: Single-cell chemistries stay well under this. A reading above it means the
@@ -98,6 +82,8 @@ MAX_PLAUSIBLE_CELL_VOLTAGE_V = 100.0
 
 def _build_fallback_map() -> dict[str, tuple[tuple[str, str | None], ...]]:
     """Merge every cycler's candidates, for files from an unrecognised cycler."""
+    # Walk every cycler's column map and collect every candidate column name
+    # per field, skipping ones already seen so the list stays short.
     merged: dict[str, list[tuple[str, str | None]]] = {}
     for spec in COLUMN_MAP.values():
         for field, candidates in spec.items():
@@ -108,6 +94,7 @@ def _build_fallback_map() -> dict[str, tuple[tuple[str, str | None], ...]]:
     return {field: tuple(candidates) for field, candidates in merged.items()}
 
 
+# Built once at import time, since COLUMN_MAP does not change at runtime.
 FALLBACK_COLUMNS = _build_fallback_map()
 
 
@@ -118,12 +105,15 @@ def infer_cycler(path: str | Path) -> str:
     the directory naming convention rather than a hardcoded lookup means new
     cycler folders work without a code change.
     """
+    # Walk the path segments from the file back towards the root, looking for
+    # the first one that starts with "cycler_".
     parts = Path(str(path)).parts
     for part in reversed(parts[:-1] if len(parts) > 1 else parts):
         if part.startswith("cycler_"):
             suffix = part[len("cycler_") :]
             # Strip the "a_"/"b_" ordering prefix when present.
             return suffix.split("_", 1)[1] if "_" in suffix else suffix
+    # No cycler_* directory found anywhere in the path.
     return "unknown"
 
 
@@ -136,6 +126,7 @@ def build_test_id(path: str | Path, cycler: str | None = None) -> str:
     path = Path(str(path))
     if cycler is None:
         cycler = infer_cycler(path)
+    # path.stem is the filename without its extension, e.g. "cell_001".
     return f"{cycler or 'unknown'}_{path.stem}"
 
 
@@ -144,6 +135,8 @@ def _to_float(value: Any) -> float | None:
     if value is None:
         return None
 
+    # Try a direct conversion first, then fall back to stripping whitespace
+    # from a string value before trying again.
     try:
         numeric_value = float(value)
     except (TypeError, ValueError):
@@ -168,9 +161,13 @@ def normalize_numeric(
     if numeric_value is None:
         return None
 
+    # Only convert when a unit was declared and it actually differs from the
+    # field's canonical unit; otherwise the value is already in the right unit.
     if unit and target_unit and unit != target_unit:
         conversion = UNIT_CONVERSIONS.get((unit, target_unit))
         if conversion is None:
+            # No known conversion for this pair — keep the raw value rather
+            # than guessing, but say so, since this should not normally happen.
             logger.warning(
                 "No conversion known from %s to %s; storing the raw value", unit, target_unit
             )
@@ -189,7 +186,9 @@ def repair_voltage_scale(voltage_v: float | None) -> tuple[float | None, bool]:
     whether a repair was applied.
     """
     if voltage_v is None or abs(voltage_v) <= MAX_PLAUSIBLE_CELL_VOLTAGE_V:
+        # Already a sensible cell voltage, or missing — nothing to repair.
         return voltage_v, False
+    # Above the plausible ceiling: assume it is millivolts and scale it down.
     return voltage_v / 1000.0, True
 
 
@@ -197,6 +196,8 @@ def _normalize_header(value: Any) -> str:
     """Reduce a header to lowercase alphanumerics for tolerant matching."""
     if value is None:
         return ""
+    # Strip accents/special characters, then keep only letters and digits so
+    # small header spelling differences ("Time [s]" vs "time/s") still match.
     normalized = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode("ascii")
     return "".join(ch for ch in normalized.casefold() if ch.isalnum())
 
@@ -214,6 +215,7 @@ def repair_mojibake(value: str) -> str | None:
     try:
         return value.encode("latin-1").decode("utf-8")
     except (UnicodeEncodeError, UnicodeDecodeError):
+        # Not mojibake (or not repairable this way) — leave it alone.
         return None
 
 
@@ -238,9 +240,13 @@ def normalized_header_index(row: dict[str, Any]) -> dict[str, Any]:
     index: dict[str, Any] = {}
     for key, value in row.items():
         if not _is_present(value):
+            # Nothing useful in this cell — don't let it shadow a real value
+            # under the same normalized key from another column.
             continue
         candidate_keys = [_normalize_header(key)]
 
+        # If the header looks like corrupted text, also index it under the
+        # repaired spelling so a declared column name can still find it.
         repaired = repair_mojibake(str(key))
         if repaired is not None and repaired != key:
             candidate_keys.append(_normalize_header(repaired))
@@ -257,6 +263,8 @@ def _resolve(
     candidates: tuple[tuple[str, str | None], ...],
 ) -> tuple[Any, str | None]:
     """Return the first present candidate's value together with its source unit."""
+    # Try each candidate column name in order, first as an exact match, then
+    # via the normalized header index (handles spelling/formatting differences).
     for name, unit in candidates:
         value = row.get(name)
         if _is_present(value):
@@ -264,6 +272,7 @@ def _resolve(
         normalized_key = _normalize_header(name)
         if normalized_key in header_index:
             return header_index[normalized_key], unit
+    # None of the candidate columns had a usable value.
     return None, None
 
 
@@ -275,18 +284,22 @@ def normalize_timeseries_row(row: dict[str, Any], cycler: str, test_id: str) -> 
     aggregates those flags so data quality issues are reported rather than
     silently absorbed.
     """
+    # Pick this cycler's column map, or the merged fallback for an unknown one.
     column_map = COLUMN_MAP.get(cycler, FALLBACK_COLUMNS)
     header_index = normalized_header_index(row)
     flags: list[str] = []
 
     normalized: dict[str, Any] = {"test_id": test_id, "cycler": cycler}
 
+    # For every schema field, find the matching source column and convert it
+    # to the field's canonical unit.
     for field in VALUE_FIELDS:
         raw_value, source_unit = _resolve(row, header_index, column_map.get(field, ()))
         normalized[field] = normalize_numeric(
             raw_value, unit=source_unit, target_unit=TARGET_UNITS.get(field)
         )
 
+    # Voltage gets one more pass: some BioLogic rows are in millivolts.
     normalized["voltage_v"], rescaled = repair_voltage_scale(normalized["voltage_v"])
     if rescaled:
         flags.append("voltage_rescaled_from_mv")
@@ -295,6 +308,8 @@ def normalize_timeseries_row(row: dict[str, Any], cycler: str, test_id: str) -> 
     if normalized["cycle_index"] is not None:
         normalized["cycle_index"] = int(normalized["cycle_index"])
 
+    # Record which required fields, if any, ended up missing so the pipeline
+    # can report exactly why a row was dropped.
     flags.extend(f"missing:{field}" for field in REQUIRED_FIELDS if normalized.get(field) is None)
 
     normalized["quality_flags"] = tuple(flags)

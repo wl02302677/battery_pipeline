@@ -1,3 +1,11 @@
+"""Tests for the data contract/quality gate in app/etl/quality.py and
+app/etl/quality_gate.py.
+
+Covers the individual check functions against a hand-built database, and the
+gate end to end (including a pass against the real bundled dataset, which
+must come back clean).
+"""
+
 from pathlib import Path
 
 import pytest
@@ -17,6 +25,7 @@ NEWARE_HEADER = "Time [s],Voltage [V],Current [A],Cycle,Capacity [Ah]\n"
 
 
 def write_file(root: Path, cycler_dir: str, name: str, content: str) -> Path:
+    """Write a small synthetic cycler export, creating the cycler_* folder if needed."""
     directory = root / cycler_dir
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
@@ -48,12 +57,15 @@ def test_check_contract_is_empty_when_nothing_was_skipped():
 
 @pytest.fixture
 def db(tmp_path):
+    """A fresh, empty SQLite database with the schema created but no rows."""
     with Database.connect(db_path=tmp_path / "battery.sqlite3") as database:
         database.ensure_schema()
         yield database
 
 
 def _insert_test(db, test_id, cycler, rows_loaded=100, rows_skipped=0, rows_duplicated=0):
+    """Insert a minimal `tests` row directly, bypassing the real ETL, so the
+    quality checks can be tested against hand-picked counters."""
     db.execute(
         "INSERT INTO tests (test_id, cycler, source_path, source_hash, rows_loaded,"
         " rows_skipped, rows_duplicated, ingested_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -72,6 +84,8 @@ def _insert_test(db, test_id, cycler, rows_loaded=100, rows_skipped=0, rows_dupl
 
 
 def _insert_row(db, test_id, timestamp_s, voltage_v, current_a, temperature_c=None):
+    """Insert a single `timeseries` row directly, with hand-picked values so a
+    test can construct exactly the plausible/implausible value it wants to check."""
     db.execute(
         "INSERT INTO timeseries (test_id, timestamp_s, voltage_v, current_a, temperature_c,"
         " capacity_ah, cycle_index) VALUES (?, ?, ?, ?, ?, ?, ?)",

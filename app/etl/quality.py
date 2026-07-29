@@ -26,11 +26,15 @@ from typing import Any, Literal
 
 from app.db import Database
 
+# A finding is either a hard failure ("critical") or something worth flagging
+# without failing the build ("warning").
 Severity = Literal["warning", "critical"]
 
 
 @dataclass(frozen=True)
 class Issue:
+    """One data contract or data quality finding."""
+
     rule: str
     severity: Severity
     message: str
@@ -54,6 +58,7 @@ PLAUSIBLE_VOLTAGE_RANGE_V = (0.0, 5.5)
 #: Generous single-cell bound; a real pack-level import would need this raised.
 PLAUSIBLE_CURRENT_MAGNITUDE_A = 100.0
 
+# Generous window covering both lab and field temperatures.
 PLAUSIBLE_TEMPERATURE_RANGE_C = (-40.0, 100.0)
 
 #: (cycler, field) pairs already known and documented not to report a given
@@ -70,6 +75,7 @@ def check_contract(ingest_summary: dict[str, Any]) -> list[Issue]:
     no usable rows and lists it in `skipped_file_paths`; this turns that into
     a `critical` issue instead of only a warning in the run's log.
     """
+    # One issue per file that produced no usable rows at all.
     return [
         Issue(
             rule="file_produced_no_usable_rows",
@@ -91,6 +97,7 @@ def check_quality(db: Database) -> list[Issue]:
     """
     issues: list[Issue] = []
 
+    # -- check 1: how many rows were skipped or duplicated, per test? -------
     for test_id, rows_loaded, rows_skipped, rows_duplicated in db.query(
         "SELECT test_id, rows_loaded, rows_skipped, rows_duplicated FROM tests"
     ):
@@ -126,6 +133,7 @@ def check_quality(db: Database) -> list[Issue]:
                 )
             )
 
+    # -- check 2: are the stored values themselves plausible? ---------------
     v_min, v_max = PLAUSIBLE_VOLTAGE_RANGE_V
     t_min, t_max = PLAUSIBLE_TEMPERATURE_RANGE_C
     for test_id, cycler, min_v, max_v, min_i, max_i, temp_count, min_t, max_t in db.query(
@@ -167,6 +175,9 @@ def check_quality(db: Database) -> list[Issue]:
             )
 
         if temp_count == 0:
+            # No temperature reported anywhere in this test. Fine for a
+            # cycler already known not to report it (Neware); worth flagging
+            # otherwise, since it could mean the column got renamed.
             if (cycler, "temperature_c") not in KNOWN_MISSING_OPTIONAL_FIELDS:
                 issues.append(
                     Issue(
@@ -198,8 +209,10 @@ def check_quality(db: Database) -> list[Issue]:
 def save_issues(db: Database, issues: list[Issue]) -> None:
     """Persist findings to `data_quality_issues` for a durable, queryable history."""
     if not issues:
+        # Nothing to write — skip opening a cursor for an empty batch.
         return
 
+    # All issues from one run share the same detected_at timestamp.
     detected_at = datetime.now(UTC).isoformat(timespec="seconds")
     db.executemany(
         """
